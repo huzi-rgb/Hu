@@ -916,59 +916,65 @@ class WJXAutoFillApp:
 
     def zhipu_generate_answer(self, question: str, api_key: str, prompt_template: str, max_retry: int = 3) -> str:
         """
-        使用智谱AI/清言API生成答案，增强鲁棒性：超时自动重试、异常兜底、合理日志
+        使用智谱AI/清言API生成答案（GLM-4），多端点，自动重试，异常兜底，日志详细。
         """
-        import time
-        import logging
         import requests
+        import logging
+        import time
 
-        if not api_key:
+        if not api_key or not question:
             return "自动填写内容"
 
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        # 构造prompt
         prompt = prompt_template.format(question=question)
         data = {
             "model": "glm-4",
-            "messages": [
-                {"role": "user", "content": prompt}
-            ]
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 100,
+            "temperature": 0.7
         }
-        for attempt in range(1, max_retry + 1):
-            try:
-                resp = requests.post(url, headers=headers, json=data, timeout=30)  # 增大超时
-                if resp.status_code == 200:
-                    result = resp.json()
-                    # 健壮性校验
-                    content = (
-                        result.get("choices", [{}])[0]
-                        .get("message", {})
-                        .get("content", "")
-                    )
-                    if content:
-                        # 防止AI暴露身份
+
+        endpoints = [
+            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+            "https://api-open.bigmodel.cn/api/paas/v4/chat/completions",
+            "https://api-us.bigmodel.cn/api/paas/v4/chat/completions",
+            "https://api-sg.bigmodel.cn/api/paas/v4/chat/completions"
+        ]
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
+        }
+
+        for endpoint in endpoints:
+            for attempt in range(1, max_retry + 1):
+                try:
+                    resp = requests.post(endpoint, headers=headers, json=data, timeout=15)
+                    if resp.status_code == 200:
+                        result = resp.json()
+                        content = (
+                            result.get("choices", [{}])[0]
+                            .get("message", {})
+                            .get("content", "")
+                        )
                         for block in ["我是AI", "我是人工智能", "我是机器人", "助手", "AI模型"]:
                             if block in content:
-                                logging.warning(f"AI作答暴露身份，已自动兜底。原回答: {content}")
+                                logging.warning(f"AI作答暴露身份，自动兜底。原回答: {content}")
                                 return "自动填写内容"
-                        return content.strip()
+                        if content:
+                            logging.info(f"智谱AI回答：{content}")
+                            return content.strip()
+                        else:
+                            logging.error("智谱AI接口返回结果为空")
+                            return "自动填写内容"
                     else:
-                        logging.error("智谱AI接口返回结果为空")
-                        return "自动填写内容"
-                else:
-                    logging.error(f"智谱AI接口调用失败: {resp.status_code} {resp.text}")
-                    # 特定错误可不重试
-                    if resp.status_code in (401, 403):
-                        break
-            except Exception as e:
-                logging.error(f"智谱AI答题失败（第{attempt}次）: {e}")
-                if attempt < max_retry:
+                        logging.error(f"智谱AI调用失败[{endpoint}]：{resp.status_code} {resp.text[:200]}")
+                        if resp.status_code in (401, 403):
+                            break
+                except Exception as e:
+                    logging.error(f"智谱AI请求异常[{endpoint}]（第{attempt}次）：{e}")
                     time.sleep(2)
         return "自动填写内容"
-
     def fill_associated_textbox(
             self, driver, question, option_element,
             default_text="自动填写内容", max_retry=8,
@@ -2763,6 +2769,7 @@ class WJXAutoFillApp:
         其次读取题型设置面板配置(multiple_texts/texts)，保证每空内容与设置一致。
         兼容 input/textarea/contenteditable。
         只填未填写的空，避免反复覆盖。
+        带详细调试日志，便于排查AI返回值及填充过程。
         """
         import random
         import time
@@ -2785,63 +2792,81 @@ class WJXAutoFillApp:
         prompt_template = self.config.get("ai_prompt_template", "请用简洁、自然的中文回答：{question}")
         question_text = self.config.get("question_texts", {}).get(q_key, "")
 
+        # Debug输出配置
+        print(
+            f"[debug] 填空题 q_num={q_num}, ai_enabled={ai_enabled}, api_key={'有' if api_key else '无'}, question_text={question_text}")
+
         if ai_enabled and api_key and question_text:
             try:
                 ai_answer = self.zhipu_generate_answer(question_text, api_key, prompt_template)
+                print(f"[debug] AI答案: {ai_answer}")  # 增加调试打印
             except Exception as e:
-                print(f"AI答题失败：{e}")
+                print(f"[debug] AI答题失败：{e}")
                 ai_answer = "自动填写内容"
             for i in range(len(all_fields)):
                 answers.append(ai_answer)
         elif q_key in self.config.get("multiple_texts", {}):
             ans_lists = self.config["multiple_texts"][q_key]
+            print(f"[debug] 多项填空答案池: {ans_lists}")
             for i in range(len(all_fields)):
                 if i < len(ans_lists) and ans_lists[i]:
-                    answers.append(random.choice(ans_lists[i]))
+                    chosen = random.choice(ans_lists[i])
+                    print(f"[debug] 选第{i}空: {chosen}")
+                    answers.append(chosen)
                 else:
                     answers.append("自动填写内容")
         elif q_key in self.config.get("texts", {}):
             ans_list = self.config["texts"][q_key]
+            print(f"[debug] 单项填空答案池: {ans_list}")
             for i in range(len(all_fields)):
-                answers.append(random.choice(ans_list) if ans_list else "自动填写内容")
+                chosen = random.choice(ans_list) if ans_list else "自动填写内容"
+                print(f"[debug] 选空{i}: {chosen}")
+                answers.append(chosen)
         else:
             answers = ["自动填写内容"] * len(all_fields)
+            print(f"[debug] 无配置答案，全部用'自动填写内容'")
+
         # ==== AI自动答题优先 ====
 
         # 只填未填写的表单内容
         for idx, field in enumerate(all_fields):
-            if (field.tag_name == "span" and field.text.strip()) or (field.get_attribute("value")):
+            val = (field.tag_name == "span" and field.text.strip()) or (field.get_attribute("value"))
+            if val:
+                print(f"[debug] 跳过第{idx}空，已有内容：{val}")
                 continue  # 已有内容不覆盖
             answer = answers[idx] if idx < len(answers) else "自动填写内容"
+            print(f"[debug] 填充第{idx}空: {answer}")
             if field.tag_name == "span" and field.get_attribute("contenteditable") == "true":
                 try:
                     driver.execute_script("arguments[0].innerText = '';", field)
                     for ch in answer:
                         field.send_keys(ch)
                         time.sleep(random.uniform(0.01, 0.03))
-                except Exception:
+                except Exception as e:
+                    print(f"[debug] span send_keys失败, 用JS赋值: {e}")
                     driver.execute_script("arguments[0].innerText = arguments[1];", field, answer)
                 try:
                     driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", field)
                     driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", field)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[debug] span 事件触发失败: {e}")
             else:
                 try:
                     field.clear()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[debug] 清空input/textarea失败: {e}")
                 try:
                     for ch in answer:
                         field.send_keys(ch)
                         time.sleep(random.uniform(0.01, 0.03))
-                except Exception:
+                except Exception as e:
+                    print(f"[debug] input/textarea send_keys失败, 用JS赋值: {e}")
                     driver.execute_script("arguments[0].value = arguments[1];", field, answer)
                 try:
                     driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", field)
                     driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", field)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[debug] input/textarea 事件触发失败: {e}")
 
         self.random_delay(*self.config.get("per_question_delay", (1.0, 3.0)))
 
