@@ -646,11 +646,14 @@ class WJXAutoFillApp:
             row=4, column=0, padx=padx, pady=pady, sticky=tk.W)
 
         # 质谱清言API Key输入
-
         ttk.Label(advanced_frame, text="质谱清言 API Key:").grid(row=4, column=1, padx=padx, pady=pady, sticky=tk.W)
         self.qingyan_api_key_entry = ttk.Entry(advanced_frame, width=40)
         self.qingyan_api_key_entry.grid(row=4, column=2, columnspan=2, padx=padx, pady=pady, sticky=tk.EW)
 
+        # 添加API Key获取链接
+        api_link = ttk.Label(advanced_frame, text="获取API Key", foreground="blue", cursor="hand2")
+        api_link.grid(row=4, column=4, padx=5, pady=pady)
+        api_link.bind("<Button-1>", lambda e: webbrowser.open("https://open.bigmodel.cn/usercenter/apikeys"))
 
         # Prompt下拉框
         ttk.Label(advanced_frame, text="AI答题Prompt模板:").grid(row=5, column=0, padx=padx, pady=pady, sticky=tk.W)
@@ -684,84 +687,142 @@ class WJXAutoFillApp:
     # ====== 新增：AI动态生成Prompt列表 ======
     def generate_prompt_templates_by_qingyan(self, question_texts, api_key):
         """
-        用质谱清言API生成prompt模板列表
+        使用质谱清言API生成prompt模板列表 - 修复版
+        返回格式: ["Prompt模板1", "Prompt模板2", ...]
         """
         import requests
 
-        # 构造prompt
+        # 验证输入
+        if not question_texts or not api_key:
+            return ["请用简洁、自然的中文回答：{question}"]
+
+        # 构造提示词
         prompt = (
-                "你是问卷AI专家。以下是一个问卷的所有题目：\n" +
-                "\n".join([f"{i + 1}.{t}" for i, t in enumerate(question_texts)]) +
-                "\n请帮我生成适合这个问卷自动作答的5-10条Prompt模板，每条要求：\n"
-                "1. 涵盖不同答题风格和角度，适配各类型题目。\n"
-                "2. 用{question}作占位符，用户调用时会用题目内容替换。\n"
-                "3. 列表输出，每条一行，不要编号和多余解释，只输出Prompt内容。\n"
-                "示例：请用简洁自然的中文回答：{question}"
+                "你是一位专业的问卷设计专家。请根据以下问卷题目，"
+                "生成5-10个简洁、自然的Prompt模板，用于自动回答这些问题。\n"
+                "要求：\n"
+                "1. 每个Prompt必须包含'{question}'占位符，该占位符会被实际的问卷题目替换\n"
+                "2. 语言风格应该自然、流畅，适合作为问卷回答\n"
+                "3. 避免包含任何AI身份标识\n"
+                "4. 输出格式：纯文本，每行一个Prompt，不要编号\n\n"
+                "示例：\n"
+                "请用简洁的中文回答：{question}\n"
+                "请根据你的实际情况回答：{question}\n\n"
+                "问卷题目：\n" +
+                "\n".join([f"• {text}" for text in question_texts[:10]])  # 最多展示10个题目
         )
 
-        # 这里以假设 POST URL 和参数为例
-        url = "https://api.qingyan.com/v1/chat/completions"
+        # API配置
+        url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
         data = {
-            "model": "qingyan-1.0",  # 填写你实际用的模型名称
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
+            "model": "glm-4",
+            "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.7,
-            "max_tokens": 400
+            "max_tokens": 800
         }
+
         try:
-            resp = requests.post(url, headers=headers, json=data, timeout=30)
-            resp.raise_for_status()
-            result = resp.json()
+            # 发送请求
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response.raise_for_status()
+
+            # 解析响应
+            result = response.json()
             content = result["choices"][0]["message"]["content"].strip()
-            prompt_list = [line.strip() for line in content.split("\n") if line.strip()]
-            return prompt_list
+
+            # 提取有效的Prompt行
+            prompt_lines = content.split("\n")
+            valid_prompts = []
+
+            for line in prompt_lines:
+                clean_line = line.strip()
+                if not clean_line:
+                    continue
+                if clean_line.startswith("示例：") or clean_line.startswith("Example:"):
+                    continue
+                if "{question}" in clean_line:
+                    valid_prompts.append(clean_line)
+                if len(valid_prompts) >= 10:
+                    break
+
+            # 如果没有有效的Prompt，使用默认值
+            if not valid_prompts:
+                return ["请用简洁、自然的中文回答：{question}"]
+
+            return valid_prompts
         except Exception as e:
-            print(f"质谱清言API调用失败: {e}")
+            logging.error(f"生成Prompt时出错: {str(e)}")
             return ["请用简洁、自然的中文回答：{question}"]
 
     def on_refresh_qingyan_prompts(self):
+        """生成Prompt - 修复版"""
         api_key = self.qingyan_api_key_entry.get().strip()
-        q_texts = list(self.config.get("question_texts", {}).values())
         if not api_key:
             messagebox.showerror("错误", "请先填写质谱清言 API Key")
             return
+
+        # 获取题目文本
+        q_texts = list(self.config.get("question_texts", {}).values())
         if not q_texts:
-            messagebox.showerror("错误", "请先解析问卷")
+            messagebox.showerror("错误", "请先解析问卷获取题目")
             return
 
-        def worker():
-            self.status_var.set("AI正在生成Prompt，请稍候...")
-            try:
-                prompt_list = self.generate_prompt_templates_by_qingyan(q_texts, api_key)
-            except Exception as e:
-                prompt_list = ["请用简洁、自然的中文回答：{question}"]
-                logging.error(f"质谱清言生成Prompt失败：{e}")
-            self.root.after(0, lambda: self._update_prompt_list(prompt_list))
-            self.status_var.set("Prompt生成完毕")
+        # 更新UI状态
+        self.status_var.set("AI正在生成Prompt，请稍候...")
+        self.status_indicator.config(foreground="orange")
+        self.root.update()
 
+        # 禁用按钮防止重复点击
+        self.parse_btn.config(state=tk.DISABLED)
+        self.start_btn.config(state=tk.DISABLED)
+
+        def worker():
+            try:
+                # 生成Prompt列表
+                prompt_list = self.generate_prompt_templates_by_qingyan(q_texts, api_key)
+
+                # 更新UI
+                self.root.after(0, lambda: self._update_prompt_list(prompt_list))
+                self.root.after(0, lambda: self.status_var.set("Prompt生成成功"))
+                self.root.after(0, lambda: self.status_indicator.config(foreground="green"))
+                self.root.after(0, lambda: messagebox.showinfo("成功", f"已生成{len(prompt_list)}条Prompt模板"))
+            except Exception as e:
+                # 错误处理
+                error_msg = f"生成Prompt失败: {str(e)}"
+                self.root.after(0, lambda: self.status_var.set("生成失败"))
+                self.root.after(0, lambda: self.status_indicator.config(foreground="red"))
+                self.root.after(0, lambda: messagebox.showerror("错误", error_msg))
+                logging.error(error_msg)
+            finally:
+                # 重新启用按钮
+                self.root.after(0, lambda: self.parse_btn.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
+
+        # 启动工作线程
         threading.Thread(target=worker, daemon=True).start()
 
     def _update_prompt_list(self, prompt_list):
-        if prompt_list:
-            self.ai_prompt_combobox['values'] = prompt_list
-            self.ai_prompt_combobox.set(prompt_list[0])
-            self.dynamic_prompt_list = prompt_list
-        else:
-            self.ai_prompt_combobox['values'] = ["请用简洁、自然的中文回答：{question}"]
-            self.ai_prompt_combobox.set("请用简洁、自然的中文回答：{question}")
-            self.dynamic_prompt_list = None
+        """更新下拉框内容 - 修复版"""
+        if not prompt_list:
+            messagebox.showwarning("提示", "未生成有效的Prompt")
+            return
+
+        # 更新下拉框
+        self.ai_prompt_combobox['values'] = prompt_list
+        self.ai_prompt_combobox.set(prompt_list[0])
+        self.dynamic_prompt_list = prompt_list
+        logging.info(f"已生成{len(prompt_list)}条Prompt模板")
 
     def on_save_config(self):
         if self.save_config():
             messagebox.showinfo("提示", "配置已保存（仅存于内存，如需导出请用导出功能）")
 
     def _process_parsed_questions(self, questions_data):
-        """处理解析得到的问卷题目数据，包括自动识别多选题中的“其他”并初始化other_texts"""
+        """处理解析得到的问卷题目数据 - 优化版"""
         try:
             import logging
             logging.info(f"解析到的题目数量: {len(questions_data)}")
@@ -814,7 +875,7 @@ class WJXAutoFillApp:
                         "min_selection": 1,
                         "max_selection": min(3, len(options))
                     }
-                    # === 新增: 自动检测“其他”选项并初始化other_texts ===
+                    # === 新增: 自动检测"其他"选项并初始化other_texts ===
                     for opt in options:
                         if "其他" in opt or "other" in str(opt).lower():
                             if question_id not in self.config["other_texts"]:
@@ -856,7 +917,6 @@ class WJXAutoFillApp:
                     # 使用一维概率列表
                     self.config["droplist_prob"][question_id] = [0.3] * len(valid_options) if valid_options else []
                 elif q_type == '11':  # 排序题
-                    print(f"[DEBUG] 排序题 {question_id} options: {options}")
                     self.config["reorder_prob"][question_id] = [0.25] * len(options)
                     self.config["option_texts"][question_id] = options
                 elif q_type == '2':  # 多项填空
@@ -877,12 +937,15 @@ class WJXAutoFillApp:
 
             # 处理完成后，更新题型设置界面
             self.root.after(0, self.reload_question_settings)
-            # 新增：自动刷新Prompt
-            self.root.after(0, self.on_refresh_qingyan_prompts)  # 自动刷新Prompt
+
+            # 新增：自动刷新Prompt - 添加延迟确保UI更新完成
+            self.root.after(500, self.on_refresh_qingyan_prompts)
 
         except Exception as e:
             import logging
             logging.error(f"处理解析的题目时出错: {str(e)}")
+            # 显示错误提示
+            self.root.after(0, lambda: messagebox.showerror("错误", f"处理解析的题目时出错: {str(e)}"))
 
     def ai_generate_answer(self, question: str, api_key: str, prompt_template: str) -> str:
         """使用OpenAI API生成答案（适配1.0+版本）"""
@@ -914,67 +977,46 @@ class WJXAutoFillApp:
             logging.error(f"AI答题失败: {str(e)}")
             return "自动填写内容"
 
-    def zhipu_generate_answer(self, question: str, api_key: str, prompt_template: str, max_retry: int = 3) -> str:
-        """
-        使用智谱AI/清言API生成答案（GLM-4），多端点，自动重试，异常兜底，日志详细。
-        """
+    def zhipu_generate_answer(self, question: str, api_key: str, prompt_template: str) -> str:
+        """使用智谱AI生成答案 - 优化版（不输出内容到日志，仅异常入日志）"""
         import requests
-        import logging
-        import time
 
         if not api_key or not question:
             return "自动填写内容"
 
-        # 构造prompt
-        prompt = prompt_template.format(question=question)
+        # 构造完整的prompt
+        full_prompt = prompt_template.replace("{question}", question)
+
+        url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
         data = {
             "model": "glm-4",
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": [{"role": "user", "content": full_prompt}],
             "max_tokens": 100,
             "temperature": 0.7
         }
 
-        endpoints = [
-            "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-            "https://api-open.bigmodel.cn/api/paas/v4/chat/completions",
-            "https://api-us.bigmodel.cn/api/paas/v4/chat/completions",
-            "https://api-sg.bigmodel.cn/api/paas/v4/chat/completions"
-        ]
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)"
-        }
-
-        for endpoint in endpoints:
-            for attempt in range(1, max_retry + 1):
-                try:
-                    resp = requests.post(endpoint, headers=headers, json=data, timeout=15)
-                    if resp.status_code == 200:
-                        result = resp.json()
-                        content = (
-                            result.get("choices", [{}])[0]
-                            .get("message", {})
-                            .get("content", "")
-                        )
-                        for block in ["我是AI", "我是人工智能", "我是机器人", "助手", "AI模型"]:
-                            if block in content:
-                                logging.warning(f"AI作答暴露身份，自动兜底。原回答: {content}")
-                                return "自动填写内容"
-                        if content:
-                            logging.info(f"智谱AI回答：{content}")
-                            return content.strip()
-                        else:
-                            logging.error("智谱AI接口返回结果为空")
-                            return "自动填写内容"
-                    else:
-                        logging.error(f"智谱AI调用失败[{endpoint}]：{resp.status_code} {resp.text[:200]}")
-                        if resp.status_code in (401, 403):
-                            break
-                except Exception as e:
-                    logging.error(f"智谱AI请求异常[{endpoint}]（第{attempt}次）：{e}")
-                    time.sleep(2)
-        return "自动填写内容"
+        try:
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+            response.raise_for_status()
+            result = response.json()
+            # 防御式解析
+            content = (
+                result.get("choices", [{}])[0]
+                .get("message", {})
+                .get("content", "")
+            ).strip()
+            # 屏蔽AI身份标识
+            if any(x in content for x in ["AI", "助手", "模型", "我是", "机器人"]):
+                return "自动填写内容"
+            return content if content else "自动填写内容"
+        except Exception as e:
+            import logging
+            logging.error(f"AI答题失败: {str(e)}")
+            return "自动填写内容"
     def fill_associated_textbox(
             self, driver, question, option_element,
             default_text="自动填写内容", max_retry=8,
@@ -1427,17 +1469,13 @@ class WJXAutoFillApp:
                         const title = titleElement ? getText(titleElement) : `题目${id}`;
                         let type = '1';
 
-                        // 1. 排序题优先
-                        if (
-                            q.querySelector('.sort-ul, .sortable, .wjx-sortable, .ui-sortable, .sort-container') ||
-                            (q.querySelector('ul') && (
-                                q.className.includes('sort') ||
-                                q.className.includes('sortable') ||
-                                q.innerHTML.includes('draggable') ||
-                                q.innerHTML.includes('拖动') ||
-                                q.innerHTML.includes('排序')
-                            ))
-                        ) {
+                        // 1. 排序题优先 - 增强识别逻辑
+                        const sortableSelectors = ['.sort-ul', '.sortable', '.wjx-sortable', '.ui-sortable', '.sort-container'];
+                        const isSortableElement = sortableSelectors.some(sel => q.querySelector(sel));
+                        const hasSortClass = /sort|sortable|reorder/i.test(q.className);
+                        const hasSortText = /排序|顺序|拖动|reorder|sort/i.test(q.textContent);
+
+                        if (isSortableElement || hasSortClass || hasSortText) {
                             type = '11';
                         }
                         // 2. 多选题（checkbox）优先于填空
@@ -1575,10 +1613,16 @@ class WJXAutoFillApp:
                 """)
                 # ----------- END 修正版JS核心 -----------
 
+                # 处理解析结果并自动生成Prompt
                 self._process_parsed_questions(questions_data)
+
+                # 更新进度状态
                 self.root.after(0, lambda: self.question_progress_var.set(100))
                 self.root.after(0, lambda: self.question_status_var.set("解析完成"))
                 self.root.after(0, lambda: messagebox.showinfo("成功", "问卷解析成功！"))
+
+                # 自动触发Prompt生成（确保在UI线程执行）
+                self.root.after(0, self.on_refresh_qingyan_prompts)
             except TimeoutException:
                 logging.error("问卷加载超时，请检查网络或链接。")
                 self.root.after(0, lambda: messagebox.showerror("错误", "问卷加载超时，请检查网络或链接。"))
@@ -1586,6 +1630,9 @@ class WJXAutoFillApp:
                 logging.error(f"解析问卷时出错: {str(e)}")
                 error_msg = str(e)
                 self.root.after(0, lambda: messagebox.showerror("错误", f"解析问卷时出错: {error_msg}"))
+        except Exception as e:
+            logging.error(f"创建浏览器驱动失败: {str(e)}")
+            self.root.after(0, lambda: messagebox.showerror("错误", f"创建浏览器驱动失败: {str(e)}"))
         finally:
             if driver:
                 try:
@@ -2761,22 +2808,15 @@ class WJXAutoFillApp:
             import logging
             logging.error(f"自动检测题目类型时出错: {str(e)}")
 
-    import openai
-
     def fill_text(self, driver, question, q_num):
-        """
-        填空题/多项填空题自动填写，优先AI自动答题（智谱AI GLM-4），
-        其次读取题型设置面板配置(multiple_texts/texts)，保证每空内容与设置一致。
-        兼容 input/textarea/contenteditable。
-        只填未填写的空，避免反复覆盖。
-        带详细调试日志，便于排查AI返回值及填充过程。
-        """
+        """填空题/多项填空题自动填写 - 优化日志版"""
         import random
         import time
+        import logging
         from selenium.webdriver.common.by import By
 
         q_key = str(q_num)
-        # 获取所有可填写的控件（顺序：contenteditable span, input, textarea）
+        # 获取所有可填写的控件
         editable_spans = question.find_elements(By.CSS_SELECTOR, "span.textCont[contenteditable='true']")
         visible_inputs = [el for el in question.find_elements(By.CSS_SELECTOR, "input[type='text']") if
                           el.is_displayed()]
@@ -2785,6 +2825,10 @@ class WJXAutoFillApp:
         if not all_fields:
             all_fields = [el for el in question.find_elements(By.CSS_SELECTOR, "input") if el.is_displayed()]
 
+        if not all_fields:
+            logging.debug(f"题目 {q_num} 未找到可填写的输入框")
+            return
+
         # ==== AI自动答题优先 ====
         answers = []
         ai_enabled = self.config.get("ai_fill_enabled", False)
@@ -2792,83 +2836,70 @@ class WJXAutoFillApp:
         prompt_template = self.config.get("ai_prompt_template", "请用简洁、自然的中文回答：{question}")
         question_text = self.config.get("question_texts", {}).get(q_key, "")
 
-        # Debug输出配置
-        print(
-            f"[debug] 填空题 q_num={q_num}, ai_enabled={ai_enabled}, api_key={'有' if api_key else '无'}, question_text={question_text}")
-
         if ai_enabled and api_key and question_text:
             try:
                 ai_answer = self.zhipu_generate_answer(question_text, api_key, prompt_template)
-                print(f"[debug] AI答案: {ai_answer}")  # 增加调试打印
+                answers = [ai_answer] * len(all_fields)
+                logging.debug(f"AI生成答案用于题目 {q_num}")
             except Exception as e:
-                print(f"[debug] AI答题失败：{e}")
-                ai_answer = "自动填写内容"
-            for i in range(len(all_fields)):
-                answers.append(ai_answer)
+                logging.warning(f"AI答题失败: {str(e)}")
+                answers = ["自动填写内容"] * len(all_fields)
         elif q_key in self.config.get("multiple_texts", {}):
             ans_lists = self.config["multiple_texts"][q_key]
-            print(f"[debug] 多项填空答案池: {ans_lists}")
             for i in range(len(all_fields)):
                 if i < len(ans_lists) and ans_lists[i]:
                     chosen = random.choice(ans_lists[i])
-                    print(f"[debug] 选第{i}空: {chosen}")
                     answers.append(chosen)
                 else:
                     answers.append("自动填写内容")
         elif q_key in self.config.get("texts", {}):
             ans_list = self.config["texts"][q_key]
-            print(f"[debug] 单项填空答案池: {ans_list}")
             for i in range(len(all_fields)):
                 chosen = random.choice(ans_list) if ans_list else "自动填写内容"
-                print(f"[debug] 选空{i}: {chosen}")
                 answers.append(chosen)
         else:
             answers = ["自动填写内容"] * len(all_fields)
-            print(f"[debug] 无配置答案，全部用'自动填写内容'")
 
-        # ==== AI自动答题优先 ====
-
-        # 只填未填写的表单内容
+        # ==== 填写答案 ====
         for idx, field in enumerate(all_fields):
             val = (field.tag_name == "span" and field.text.strip()) or (field.get_attribute("value"))
             if val:
-                print(f"[debug] 跳过第{idx}空，已有内容：{val}")
                 continue  # 已有内容不覆盖
+
             answer = answers[idx] if idx < len(answers) else "自动填写内容"
-            print(f"[debug] 填充第{idx}空: {answer}")
+
             if field.tag_name == "span" and field.get_attribute("contenteditable") == "true":
                 try:
                     driver.execute_script("arguments[0].innerText = '';", field)
                     for ch in answer:
                         field.send_keys(ch)
                         time.sleep(random.uniform(0.01, 0.03))
-                except Exception as e:
-                    print(f"[debug] span send_keys失败, 用JS赋值: {e}")
+                except Exception:
                     driver.execute_script("arguments[0].innerText = arguments[1];", field, answer)
                 try:
                     driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", field)
                     driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", field)
-                except Exception as e:
-                    print(f"[debug] span 事件触发失败: {e}")
+                except Exception:
+                    pass
             else:
                 try:
                     field.clear()
-                except Exception as e:
-                    print(f"[debug] 清空input/textarea失败: {e}")
+                except Exception:
+                    pass
                 try:
                     for ch in answer:
                         field.send_keys(ch)
                         time.sleep(random.uniform(0.01, 0.03))
-                except Exception as e:
-                    print(f"[debug] input/textarea send_keys失败, 用JS赋值: {e}")
+                except Exception:
                     driver.execute_script("arguments[0].value = arguments[1];", field, answer)
                 try:
                     driver.execute_script("arguments[0].dispatchEvent(new Event('input', { bubbles: true }));", field)
                     driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", field)
-                except Exception as e:
-                    print(f"[debug] input/textarea 事件触发失败: {e}")
+                except Exception:
+                    pass
 
         self.random_delay(*self.config.get("per_question_delay", (1.0, 3.0)))
+        logging.info(f"已填写题目 {q_num}")
 
     def repair_required_questions(self, driver):
         """
