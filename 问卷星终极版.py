@@ -932,9 +932,6 @@ class WJXAutoFillApp:
             # 处理完成后，更新题型设置界面
             self.root.after(0, self.reload_question_settings)
 
-            # 新增：自动刷新Prompt - 添加延迟确保UI更新完成
-            self.root.after(500, self.on_refresh_qingyan_prompts)
-
         except Exception as e:
             import logging
             logging.error(f"处理解析的题目时出错: {str(e)}")
@@ -994,7 +991,7 @@ class WJXAutoFillApp:
             data = {
                 "model": "glm-4",
                 "messages": [{"role": "user", "content": full_prompt}],
-                "max_tokens": 40,  # 保证极简
+                "max_tokens": 100,  # 保证极简
                 "temperature": 0.7
             }
             response = requests.post(url, headers=headers, json=data, timeout=10)
@@ -1666,8 +1663,7 @@ class WJXAutoFillApp:
                 self.root.after(0, lambda: self.question_status_var.set("解析完成"))
                 self.root.after(0, lambda: messagebox.showinfo("成功", "问卷解析成功！"))
 
-                # 自动触发Prompt生成（确保在UI线程执行）
-                self.root.after(0, self.on_refresh_qingyan_prompts)
+
             except TimeoutException:
                 logging.error("问卷加载超时，请检查网络或链接。")
                 self.root.after(0, lambda: messagebox.showerror("错误", "问卷加载超时，请检查网络或链接。"))
@@ -3152,15 +3148,7 @@ class WJXAutoFillApp:
             logging.error(f"自动补全题目时出错: {str(e)}")
 
     def submit_survey(self, driver):
-        """
-        高度自动化的问卷提交器（优化版）
 
-        - 智能定位与点击提交按钮
-        - 自动滑块验证码处理
-        - 必填项自动修复
-        - 全自动重试与刷新机制
-        - 结构清晰，易于维护和扩展
-        """
         import time
         import random
         from selenium.webdriver.common.by import By
