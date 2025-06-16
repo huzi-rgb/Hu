@@ -684,35 +684,28 @@ class WJXAutoFillApp:
         tip_label = ttk.Label(scrollable_frame, text="提示: 填写前请先解析问卷以获取题目结构", style='Warning.TLabel')
         tip_label.grid(row=6, column=0, columnspan=2, pady=(10, 0))
 
-    # ====== 新增：AI动态生成Prompt列表 ======
     def generate_prompt_templates_by_qingyan(self, question_texts, api_key):
-        """
-        使用质谱清言API生成prompt模板列表 - 修复版
-        返回格式: ["Prompt模板1", "Prompt模板2", ...]
-        """
         import requests
 
-        # 验证输入
-        if not question_texts or not api_key:
-            return ["请用简洁、自然的中文回答：{question}"]
+        # 只取前8个题目避免过长
+        question_samples = "\n".join([f"{i + 1}. {q}" for i, q in enumerate(question_texts[:10])])
 
-        # 构造提示词
+        # 构建Prompt要求
         prompt = (
-                "你是一位专业的问卷设计专家。请根据以下问卷题目，"
-                "生成5-10个简洁、自然的Prompt模板，用于自动回答这些问题。\n"
-                "要求：\n"
-                "1. 每个Prompt必须包含'{question}'占位符，该占位符会被实际的问卷题目替换\n"
-                "2. 语言风格应该自然、流畅，适合作为问卷回答\n"
-                "3. 避免包含任何AI身份标识\n"
-                "4. 输出格式：纯文本，每行一个Prompt，不要编号\n\n"
-                "示例：\n"
-                "请用简洁的中文回答：{question}\n"
-                "请根据你的实际情况回答：{question}\n\n"
-                "问卷题目：\n" +
-                "\n".join([f"• {text}" for text in question_texts[:10]])  # 最多展示10个题目
+            f"你是问卷填写专家，需要为以下问卷题目生成答题人设和答题风格：\n{question_samples}\n"
+            "请根据题目内容，创造15-20个不同的真实答题人设，每个包含性别、年龄、职业、地域等细节。"
+            "为每个人设生成1条答题Prompt，要求：\n"
+            "1. 人设真实自然，但每个人设要求填写问卷极简。\n"
+            "2. 如果题目涉及金额、年龄、数量、百分比等，只输出纯数字或简单单位（如'1000'、'22'、'3年'、'3000元'、'50%'），不要多余说明。\n"
+            "3. 如果是主观题或无特别答案，输出如'无'、'不知道'、'一般'、'还行'、'没有'、'不清楚'、'都可以'等极简短语即可。\n"
+            "4. 不要花哨口头禅，不要复述题干，不要任何多余修饰和口语化。\n"
+            "5. 严禁出现'AI'、'助手'等非人类词汇。\n"
+            "6. 格式为：你是[人设]，请用极简风格直接作答：{question}\n"
+            "示例1：你是22岁的重庆女生，大三学生。请用极简数字/短语回答：{question}\n"
+            "示例2：你是35岁的杭州程序员，有个5岁女儿。请直接用'无'或数字回答：{question}\n"
+            "直接输出Prompt列表，每行一条，不要编号。"
         )
 
-        # API配置
         url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -721,98 +714,99 @@ class WJXAutoFillApp:
         data = {
             "model": "glm-4",
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
-            "max_tokens": 800
+            "temperature": 0.89,
+
         }
 
         try:
-            # 发送请求
-            response = requests.post(url, headers=headers, json=data, timeout=30)
-            response.raise_for_status()
+            resp = requests.post(url, headers=headers, json=data, timeout=40)
+            resp.raise_for_status()
+            result = resp.json()
 
-            # 解析响应
-            result = response.json()
-            content = result["choices"][0]["message"]["content"].strip()
+            # 提取API返回内容
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-            # 提取有效的Prompt行
-            prompt_lines = content.split("\n")
-            valid_prompts = []
+            # 按行分割并清洗结果
+            lines = [line.strip() for line in content.split("\n") if line.strip()]
 
-            for line in prompt_lines:
-                clean_line = line.strip()
-                if not clean_line:
-                    continue
-                if clean_line.startswith("示例：") or clean_line.startswith("Example:"):
-                    continue
-                if "{question}" in clean_line:
-                    valid_prompts.append(clean_line)
-                if len(valid_prompts) >= 10:
-                    break
+            # 过滤包含禁用词的Prompt
+            ban_words = ["AI", "助手", "机器人", "智能", "人工智能", "模型", "自动", "程序"]
+            prompt_list = [line for line in lines if not any(word in line for word in ban_words)]
 
-            # 如果没有有效的Prompt，使用默认值
-            if not valid_prompts:
-                return ["请用简洁、自然的中文回答：{question}"]
+            # 空结果处理：返回默认模板
+            if not prompt_list:
+                return [
+                    "你是19岁的山东男生，大学生。请用极简数字/短语作答：{question}",
+                    "你是28岁的北京白领。请直接用'无'或数字作答：{question}"
+                ]
+            return prompt_list
 
-            return valid_prompts
         except Exception as e:
-            logging.error(f"生成Prompt时出错: {str(e)}")
-            return ["请用简洁、自然的中文回答：{question}"]
-
+            return ["你是23岁的南方女生，性格内向，大学生。请简答：{question}"]
     def on_refresh_qingyan_prompts(self):
-        """生成Prompt - 修复版"""
+        """生成Prompt - 优化版（带状态提示和错误处理）"""
         api_key = self.qingyan_api_key_entry.get().strip()
         if not api_key:
-            messagebox.showerror("错误", "请先填写质谱清言 API Key")
+            messagebox.showerror("错误", "请先填写质谱清言API Key")
             return
 
-        # 获取题目文本
-        q_texts = list(self.config.get("question_texts", {}).values())
+        # 获取题目文本（最多15题）
+        q_texts = list(self.config.get("question_texts", {}).values())[:15]
         if not q_texts:
             messagebox.showerror("错误", "请先解析问卷获取题目")
             return
 
         # 更新UI状态
-        self.status_var.set("AI正在生成Prompt，请稍候...")
+        self.status_var.set("AI正在生成Prompt...")
         self.status_indicator.config(foreground="orange")
         self.root.update()
 
         # 禁用按钮防止重复点击
         self.parse_btn.config(state=tk.DISABLED)
         self.start_btn.config(state=tk.DISABLED)
+        self.save_btn.config(state=tk.DISABLED)
+
+        # 显示加载动画
+        self.progress_bar.config(mode="indeterminate")
+        self.progress_bar.start()
 
         def worker():
             try:
-                # 生成Prompt列表
                 prompt_list = self.generate_prompt_templates_by_qingyan(q_texts, api_key)
 
-                # 更新UI
                 self.root.after(0, lambda: self._update_prompt_list(prompt_list))
                 self.root.after(0, lambda: self.status_var.set("Prompt生成成功"))
                 self.root.after(0, lambda: self.status_indicator.config(foreground="green"))
                 self.root.after(0, lambda: messagebox.showinfo("成功", f"已生成{len(prompt_list)}条Prompt模板"))
+
             except Exception as e:
-                # 错误处理
                 error_msg = f"生成Prompt失败: {str(e)}"
                 self.root.after(0, lambda: self.status_var.set("生成失败"))
                 self.root.after(0, lambda: self.status_indicator.config(foreground="red"))
                 self.root.after(0, lambda: messagebox.showerror("错误", error_msg))
                 logging.error(error_msg)
+
             finally:
-                # 重新启用按钮
+                # 恢复UI状态
+                self.root.after(0, lambda: self.progress_bar.stop())
+                self.root.after(0, lambda: self.progress_bar.config(mode="determinate"))
                 self.root.after(0, lambda: self.parse_btn.config(state=tk.NORMAL))
                 self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.save_btn.config(state=tk.NORMAL))
 
         # 启动工作线程
         threading.Thread(target=worker, daemon=True).start()
 
     def _update_prompt_list(self, prompt_list):
-        """更新下拉框内容 - 修复版"""
+        """更新Prompt下拉框 - 优化版"""
         if not prompt_list:
             messagebox.showwarning("提示", "未生成有效的Prompt")
             return
 
         # 更新下拉框
-        self.ai_prompt_combobox['values'] = prompt_list
+        current_values = list(self.ai_prompt_combobox["values"])
+        new_values = current_values + prompt_list
+        self.ai_prompt_combobox["values"] = new_values
         self.ai_prompt_combobox.set(prompt_list[0])
         self.dynamic_prompt_list = prompt_list
         logging.info(f"已生成{len(prompt_list)}条Prompt模板")
@@ -978,45 +972,96 @@ class WJXAutoFillApp:
             return "自动填写内容"
 
     def zhipu_generate_answer(self, question: str, api_key: str, prompt_template: str) -> str:
-        """使用智谱AI生成答案 - 优化版（不输出内容到日志，仅异常入日志）"""
+        """
+        根据身份生成极简自然的问卷答案（只输出数字或极短短语，无身份前缀）
+        """
         import requests
 
-        if not api_key or not question:
-            return "自动填写内容"
 
-        # 构造完整的prompt
-        full_prompt = prompt_template.replace("{question}", question)
+        # 1. 提取人设
+        identity = self.extract_identity_from_prompt(prompt_template)
 
-        url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "model": "glm-4",
-            "messages": [{"role": "user", "content": full_prompt}],
-            "max_tokens": 100,
-            "temperature": 0.7
-        }
+        # 2. 构建全新Prompt：身份只作角色背景，回答必须极简
+        full_prompt = (
+            f"你现在的身份是：{identity}。请仅用数字或极简短语（如“无”、“不知道”、“还行”、“一般”），直接回答下面的问题，不要解释，不要复述题干：\n"
+            f"{question}"
+        )
 
+        # 3. API请求
         try:
-            response = requests.post(url, headers=headers, json=data, timeout=30)
+            url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+            headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+            data = {
+                "model": "glm-4",
+                "messages": [{"role": "user", "content": full_prompt}],
+                "max_tokens": 40,  # 保证极简
+                "temperature": 0.7
+            }
+            response = requests.post(url, headers=headers, json=data, timeout=10)
             response.raise_for_status()
             result = response.json()
-            # 防御式解析
             content = (
                 result.get("choices", [{}])[0]
                 .get("message", {})
                 .get("content", "")
-            ).strip()
-            # 屏蔽AI身份标识
-            if any(x in content for x in ["AI", "助手", "模型", "我是", "机器人"]):
-                return "自动填写内容"
-            return content if content else "自动填写内容"
-        except Exception as e:
-            import logging
-            logging.error(f"AI答题失败: {str(e)}")
-            return "自动填写内容"
+                .strip()
+            )
+
+            # 4. 答案后处理：去身份前缀、去多余修饰、只留数字/极短短语
+            content = self.simplify_answer(content)
+
+            # 如答案依然过长或为空，用备选答案兜底
+            if not content or len(content) > 10:
+                return self.get_identity_answer(identity)
+            return content
+
+        except Exception:
+            return self.get_identity_answer(identity)
+
+    def extract_identity_from_prompt(self, prompt_template: str) -> str:
+        """从Prompt模板提取身份（只保留“xx岁xx职业/地区/性别”这种）"""
+        import re
+        # 匹配“你是...”或“身份：...”等格式
+        match = re.search(r"你是([^\u4e00-\u9fa5a-zA-Z0-9]*[\u4e00-\u9fa5a-zA-Z0-9，、 ]+)", prompt_template)
+        if match:
+            return match.group(1).split("，请")[0].strip()
+        return "用户"
+
+    def simplify_answer(self, answer: str) -> str:
+        """去掉AI的修饰语，只留极简答案（数字/短词）"""
+        import re
+        answer = answer.strip()
+        # 去除“我觉得”“我认为”等
+        answer = re.sub(r"^(我[觉得认为看]|作为[^，。]*)[，。]?", "", answer)
+        # 去除身份前缀
+        answer = re.sub(r"^[\u4e00-\u9fa5a-zA-Z0-9]+[:：]", "", answer)
+        # 只保留第一个短句、数字或极短短语
+        answer = re.split(r"[，,。！!？?；;]", answer)[0]
+        if len(answer) > 10:
+            answer = answer[:10]
+        return answer.strip()
+
+    def get_identity_answer(self, identity: str) -> str:
+        """备选答案池：按不同身份返回极简短语/数字"""
+        import random
+        pools = {
+            "学生": ["无", "不知道", "一般", "还行", "1000", "500", "偶尔", "3年"],
+            "上班族": ["还行", "一般", "3000", "5000", "无", "偶尔", "常用"],
+            "老师": ["2000", "满意", "偶尔", "无", "一般", "还行"],
+            "程序员": ["8000", "3000", "常用", "偶尔", "无", "还行"],
+            "宝妈": ["还行", "一般", "无", "偶尔", "3000"],
+            "老人": ["无", "1000", "偶尔", "一般"],
+            "青少年": ["100", "无", "偶尔", "还行"],
+            "中年人": ["5000", "无", "偶尔", "一般"],
+            "男士": ["3000", "无", "偶尔", "还行"],
+            "女士": ["2000", "无", "偶尔", "一般"],
+            "用户": ["无", "还行", "一般", "不知道", "1000"],
+        }
+        for k in pools:
+            if k in identity:
+                return random.choice(pools[k])
+        return random.choice(pools["用户"])
+
     def fill_associated_textbox(
             self, driver, question, option_element,
             default_text="自动填写内容", max_retry=8,
