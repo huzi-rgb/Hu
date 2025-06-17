@@ -1576,7 +1576,7 @@ class WJXAutoFillApp:
 
     def _parse_survey_thread(self):
         """
-        解析问卷结构并生成配置模板 - 题型判别加强版（增强量表题检测）
+        解析问卷结构并生成配置模板 - 题型判别加强版（更强量表题检测，结构/文本/内容多维度）
         """
         driver = None
         try:
@@ -1673,61 +1673,103 @@ class WJXAutoFillApp:
                             titleElement = q.querySelector('h2, h3, .title, .question-text');
                         }
                         const title = titleElement ? getText(titleElement) : `题目${id}`;
-                        let type = '1';
 
-                        // 1. 排序题优先 - 增强识别逻辑
+                        // ========== 增强的量表题检测 ==========
+                        let isLikertScale = false;
+
+                        // 1. 量表相关类名
+                        const scaleClasses = [
+                            'scale-ul', 'scale', 'likert', 'rating', 'wjx-scale',
+                            'likert-scale', 'rating-scale', 'matrix-rating'
+                        ];
+                        if (scaleClasses.some(cls => q.querySelector('.' + cls))) {
+                            isLikertScale = true;
+                        }
+
+                        // 2. 表格结构（带量表表头）
+                        if (!isLikertScale) {
+                            const table = q.querySelector('table');
+                            if (table) {
+                                const ths = table.querySelectorAll('th');
+                                const hasScaleHeaders = Array.from(ths).some(th =>
+                                    /非常|比较|一般|不太|从不|满意|同意/.test(th.textContent)
+                                );
+                                const rows = table.querySelectorAll('tr');
+                                if (rows.length > 1) {
+                                    const dataRows = Array.from(rows).slice(1);
+                                    const radiosPerRow = dataRows.map(row =>
+                                        row.querySelectorAll('input[type="radio"]').length
+                                    );
+                                    if (
+                                        radiosPerRow.length > 0 &&
+                                        radiosPerRow.every(count => count === radiosPerRow[0]) &&
+                                        radiosPerRow[0] > 1 &&
+                                        hasScaleHeaders
+                                    ) {
+                                        isLikertScale = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. 选项文本模式
+                        if (!isLikertScale) {
+                            const options = q.querySelectorAll('.ulradiocheck label, .wjx-option-label, .option-label');
+                            if (options.length > 0) {
+                                const optionTexts = Array.from(options).map(opt => getText(opt));
+                                const isLikertPattern = (
+                                    optionTexts.some(t => /非常|比较|一般|不太|从不/.test(t)) ||
+                                    optionTexts.some(t => /完全|大部分|部分|少量|没有/.test(t)) ||
+                                    optionTexts.some(t => /总是|经常|有时|很少|从不/.test(t)) ||
+                                    optionTexts.some(t => /非常满意|满意|一般|不满意|非常不满意/.test(t))
+                                );
+                                const allNumbers = optionTexts.every(t => /^\\d+$/.test(t));
+                                const nums = optionTexts.map(t => parseInt(t));
+                                const isConsecutive = nums.every((num, i, arr) => i === 0 || num === arr[i-1] + 1);
+                                if ((isLikertPattern || (allNumbers && isConsecutive)) && options.length >= 3) {
+                                    isLikertScale = true;
+                                }
+                            }
+                        }
+
+                        // 4. 特殊结构
+                        if (!isLikertScale) {
+                            const hasScaleDescription = q.textContent.includes('请选择最符合您情况的选项') ||
+                                                       q.textContent.includes('请根据您的同意程度选择');
+                            const hasEndLabels = q.querySelector('.left-label') &&
+                                                 q.querySelector('.right-label');
+                            if (hasScaleDescription || hasEndLabels) {
+                                isLikertScale = true;
+                            }
+                        }
+
+                        // ========== 排序题检测 ==========
                         const sortableSelectors = ['.sort-ul', '.sortable', '.wjx-sortable', '.ui-sortable', '.sort-container'];
                         const isSortableElement = sortableSelectors.some(sel => q.querySelector(sel));
                         const hasSortClass = /sort|sortable|reorder/i.test(q.className);
                         const hasSortText = /排序|顺序|拖动|reorder|sort/i.test(q.textContent);
 
+                        // ========== 题型判定 ==========
+                        let type = '1';
                         if (isSortableElement || hasSortClass || hasSortText) {
                             type = '11';
-                        }
-                        // 2. 量表题 优先于单选/多选 (增强版)
-                        else if (
-                            q.querySelector('.scale-ul, .scale, .likert, .rating, .wjx-scale') ||
-                            (function(){
-                                let rows = q.querySelectorAll('tr');
-                                if(rows.length > 2) {
-                                    let radios_per_row = [];
-                                    rows.forEach(row => {
-                                        radios_per_row.push(row.querySelectorAll('input[type="radio"]').length);
-                                    });
-                                    let all_same = radios_per_row.every(v => v === radios_per_row[0]);
-                                    return all_same && radios_per_row[0] > 1;
-                                }
-                                return false;
-                            })()
-                        ) {
+                        } else if (isLikertScale) {
                             type = '5';
-                        }
-                        // 3. 多选题（checkbox）
-                        else if (q.querySelector('.ui-checkbox, input[type="checkbox"]')) {
+                        } else if (q.querySelector('.ui-checkbox, input[type="checkbox"]')) {
                             type = '4';
-                        }
-                        // 4. 单选题（radio）
-                        else if (q.querySelector('.ui-radio, input[type="radio"]')) {
+                        } else if (q.querySelector('.ui-radio, input[type="radio"]') && !isLikertScale) {
                             type = '3';
-                        }
-                        // 5. 矩阵题
-                        else if (q.querySelector('.matrix, table.matrix')) {
+                        } else if (q.querySelector('.matrix, table.matrix')) {
                             type = '6';
-                        }
-                        // 6. 下拉框
-                        else if (q.querySelector('select, .custom-select, .dropdown, .select-box')) {
+                        } else if (q.querySelector('select, .custom-select, .dropdown, .select-box')) {
                             type = '7';
-                        }
-                        // 7. 多项填空（多个空，且没有选择题结构）
-                        else if (
+                        } else if (
                             q.querySelectorAll('input[type="text"]').length > 1 ||
                             q.querySelectorAll('textarea').length > 1 ||
                             q.querySelectorAll('span[contenteditable="true"]').length > 1
                         ) {
                             type = '2';
-                        }
-                        // 8. 单项填空（一个空，且没有选择题结构）
-                        else if (
+                        } else if (
                             q.querySelectorAll('input[type="text"]').length === 1 ||
                             q.querySelectorAll('textarea').length === 1 ||
                             q.querySelectorAll('span[contenteditable="true"]').length === 1
@@ -1735,7 +1777,7 @@ class WJXAutoFillApp:
                             type = '1';
                         }
 
-                        // 选项提取逻辑 - 增强下拉框选项提取
+                        // ========== 选项提取 ==========
                         let options = [];
                         let 空数 = 0;
                         if (type === '2') {
@@ -1755,8 +1797,7 @@ class WJXAutoFillApp:
                                 if (txt) options.push(txt);
                             }
                         } else if (type === '7') {
-                            // 下拉框选项 - 增强版
-                            // 1. 原生select元素
+                            // 下拉框选项
                             let selects = q.querySelectorAll('select');
                             if (selects.length > 0) {
                                 for (let sel of selects) {
@@ -1768,25 +1809,20 @@ class WJXAutoFillApp:
                                     }
                                 }
                             } else {
-                                // 2. 自定义下拉框
                                 let customDropdowns = q.querySelectorAll('.custom-select, .dropdown, .select-box');
                                 for (let dd of customDropdowns) {
                                     try {
-                                        // 模拟点击展开下拉
                                         dd.click();
-                                        // 获取选项
                                         let dropdownOptions = document.querySelectorAll('.option, .select-item, .dropdown-item');
                                         for (let op of dropdownOptions) {
                                             if (op.style.display !== 'none' && op.textContent.trim() !== "请选择") {
                                                 options.push(op.textContent.trim());
                                             }
                                         }
-                                        // 关闭下拉
                                         dd.click();
                                     } catch(e) {}
                                 }
                             }
-                            // 3. 最后尝试：直接通过类名获取
                             if (options.length === 0) {
                                 let optionElems = q.querySelectorAll('.option, .select-item, .dropdown-item');
                                 for (let op of optionElems) {
