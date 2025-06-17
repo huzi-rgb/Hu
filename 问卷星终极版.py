@@ -5030,24 +5030,40 @@ class WJXAutoFillApp:
 
     def ai_generate_structure(self):
         """
-        本地+AI双重题型识别，智能辅助纠正量表题等易混题型。
-        结构化流程：
-        1. 本地解析所有题，得到题号、题目、类型。
-        2. AI再分析一遍所有题，输出AI理解的类型。
-        3. 比对同一题号本地类型和AI类型，如果本地为“单选”且AI为“量表”，自动标记为“疑似量表题”。
-        4. 日志栏/界面上高亮显示这些题，提示“建议改为量表题”，可一键应用AI建议。
-        5. 用户确认后，修改题型配置，刷新界面。
+        本地+AI双重题型识别，AI辅助判别，自动清洗AI返回的非标准JSON，解决‘AI解析失败’弹窗，支持一键修正量表题。
         """
         import logging
         import tkinter.messagebox as messagebox
+        import re
+        import json
         from ai_questionnaire_parser import ai_parse_questionnaire
+
+        def extract_json(text):
+            """更健壮的AI JSON清洗，兼容注释/代码块/多余逗号"""
+            text = str(text)
+            # 去除所有行首为//的注释
+            text = re.sub(r'^\s*//.*$', '', text, flags=re.MULTILINE)
+            # 去除代码块标识
+            text = text.replace('```json', '').replace('```', '')
+            # 只保留第一个完整的大括号包裹内容
+            m = re.search(r'\{[\s\S]*\}', text)
+            if not m:
+                return None
+            pure = m.group(0)
+            # 去除行尾多余逗号（兼容AI输出的json）
+            pure = re.sub(r',\s*([\]}])', r'\1', pure)
+            try:
+                return json.loads(pure)
+            except Exception as e:
+                logging.warning(f"[AI解析] JSON解析失败: {e}")
+                return None
 
         api_key = self.qingyan_api_key_entry.get().strip()
         if not api_key:
             messagebox.showerror("错误", "请先填写质谱清言API Key")
             return
 
-        # 1. 本地解析所有题目及类型
+        # 本地解析所有题目及类型
         local_types = {}  # qid: 本地类型
         local_type_map = {
             "single_prob": "单选题",
@@ -5063,7 +5079,7 @@ class WJXAutoFillApp:
             for qid in self.config.get(config_key, {}):
                 local_types[str(qid)] = type_name
 
-        # 2. AI分析一遍所有题，输出AI理解的类型
+        # AI分析一遍所有题，输出AI理解的类型
         questions = []
         for qid, qtext in self.config.get("question_texts", {}).items():
             opts = self.config["option_texts"].get(qid, [])
@@ -5074,14 +5090,25 @@ class WJXAutoFillApp:
         self.root.update()
 
         try:
-            ai_result = ai_parse_questionnaire(questions, api_key)
-            if not isinstance(ai_result, dict) or "questions" not in ai_result:
-                messagebox.showerror("AI解析失败", f"AI返回内容无法解析结构。\n{ai_result}")
+            ai_raw_result = ai_parse_questionnaire(questions, api_key)
+
+            # --- 自动清洗AI返回的非标准JSON ---
+            ai_result = ai_raw_result
+            # 如果不是dict或没有questions字段就自动提取纯净JSON
+            if not isinstance(ai_raw_result, dict) or "questions" not in ai_raw_result:
+                ai_result = extract_json(ai_raw_result)
+
+            if not ai_result or "questions" not in ai_result:
+                # 失败弹窗中显示原始AI内容
+                messagebox.showerror(
+                    "AI解析失败",
+                    f"AI返回内容无法解析结构。\n\n建议：\n1. 检查API Key和网络。\n2. 升级AI Prompt确保只输出标准JSON。\n3. 联系开发者。\n\nAI原始返回：\n{str(ai_raw_result)[:800]}"
+                )
                 self.status_var.set("AI结构识别失败")
                 self.status_indicator.config(foreground="red")
                 return
 
-            # 3. 比对同一题号本地类型和AI类型
+            # 比对同一题号本地类型和AI类型
             ai_type_map = {
                 "填空": "填空题",
                 "多项填空": "多项填空",
@@ -5094,17 +5121,17 @@ class WJXAutoFillApp:
             }
             ai_types = {}
             for q in ai_result["questions"]:
-                qid = str(q["id"])
+                qid = str(q.get("id"))
                 ai_type = ai_type_map.get(q.get("type", ""), q.get("type", ""))
                 ai_types[qid] = ai_type
 
-            # 4. 标记疑似量表题（本地为单选，AI为量表）
+            # 标记疑似量表题（本地为单选，AI为量表）
             suspect_scale_qids = [
                 qid for qid in local_types
                 if local_types[qid] == "单选题" and ai_types.get(qid) == "量表题"
             ]
 
-            # 5. 日志栏/弹窗提示，允许一键修正
+            # 日志栏/弹窗提示，允许一键修正
             if suspect_scale_qids:
                 msg = "检测到以下题目本地判为【单选题】，AI认为是【量表题】：\n"
                 for qid in suspect_scale_qids:
@@ -5116,7 +5143,8 @@ class WJXAutoFillApp:
                     # 应用修正
                     for qid in suspect_scale_qids:
                         # 移除单选题配置
-                        if qid in self.config["single_prob"]: del self.config["single_prob"][qid]
+                        if qid in self.config["single_prob"]:
+                            del self.config["single_prob"][qid]
                         # 添加量表题配置
                         opts = self.config["option_texts"].get(qid, [])
                         self.config["scale_prob"][qid] = [0.2] * len(opts)
@@ -5128,7 +5156,7 @@ class WJXAutoFillApp:
             else:
                 logging.info("未检测到需修正的疑似量表题。")
 
-            # 6. 输出AI题型统计
+            # 输出AI题型统计
             type_count = {name: 0 for name in ai_type_map.values()}
             for typ in ai_types.values():
                 if typ in type_count:
@@ -5145,6 +5173,97 @@ class WJXAutoFillApp:
             messagebox.showerror("AI解析失败", f"{e}")
             self.status_var.set("AI结构识别失败")
             self.status_indicator.config(foreground="red")
+import tkinter as tk
+from tkinter import ttk, scrolledtext, messagebox
+import threading
+import requests
+
+class AIChatTab(ttk.Frame):
+    def __init__(self, master, api_key_getter, model_name="gpt-3.5-turbo"):
+        super().__init__(master)
+        self.api_key_getter = api_key_getter
+        self.model_name = model_name
+        self.history = []
+        self.build_ui()
+
+    def build_ui(self):
+        # 聊天历史区
+        self.text_area = scrolledtext.ScrolledText(self, height=18, wrap=tk.WORD, state='disabled')
+        self.text_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # 输入区
+        input_frame = ttk.Frame(self)
+        input_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.input_var = tk.StringVar()
+        self.input_entry = ttk.Entry(input_frame, textvariable=self.input_var, width=80)
+        self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.input_entry.bind("<Return>", self.on_send)
+
+        self.send_btn = ttk.Button(input_frame, text="发送", command=self.on_send)
+        self.send_btn.pack(side=tk.LEFT, padx=5)
+
+    def on_send(self, event=None):
+        question = self.input_var.get().strip()
+        if not question:
+            return
+        self.append_history("你", question)
+        self.input_var.set("")
+        self.send_btn.config(state=tk.DISABLED)
+        threading.Thread(target=self.ask_ai, args=(question,), daemon=True).start()
+
+    def append_history(self, who, text):
+        self.text_area.config(state='normal')
+        self.text_area.insert(tk.END, f"{who}: {text}\n")
+        self.text_area.config(state='disabled')
+        self.text_area.see(tk.END)
+
+    def ask_ai(self, question):
+        self.append_history("AI", "（思考中...）")
+        api_key = self.api_key_getter()
+        # 构造上下文
+        messages = [
+            {"role": "system", "content": "你是问卷自动化专家，请用简洁、专业、实用的方式回答用户关于问卷配置、题型设计、自动填写、报错排查等问题。"}
+        ]
+        # 最近6轮上下文
+        for old in self.history[-6:]:
+            messages.append(old)
+        messages.append({"role": "user", "content": question})
+
+        try:
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": self.model_name,
+                    "messages": messages,
+                    "temperature": 0.7,
+                    "max_tokens": 800
+                },
+                timeout=60
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            answer = data["choices"][0]["message"]["content"].strip()
+            self.history.append({"role": "user", "content": question})
+            self.history.append({"role": "assistant", "content": answer})
+            # 更新UI
+            self.text_area.config(state='normal')
+            # 删除思考中
+            self.text_area.delete("end-2l", "end-1l")
+            self.text_area.insert(tk.END, f"AI: {answer}\n")
+            self.text_area.config(state='disabled')
+            self.text_area.see(tk.END)
+        except Exception as e:
+            self.text_area.config(state='normal')
+            self.text_area.delete("end-2l", "end-1l")
+            self.text_area.insert(tk.END, f"AI: [出错了: {e}]\n")
+            self.text_area.config(state='disabled')
+            self.text_area.see(tk.END)
+        finally:
+            self.send_btn.config(state=tk.NORMAL)
 if __name__ == "__main__":
     root = ThemedTk(theme="arc")
     root.geometry("1280x900")  # 增大初始窗口尺寸，宽度≥1200
