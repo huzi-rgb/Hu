@@ -2302,12 +2302,13 @@ class WJXAutoFillApp:
     def auto_click_next_page(self, driver):
         """
         更鲁棒的问卷星翻页函数：多重检测，保证翻页成功才返回True，否则False。
-        修正版：输出详细日志并返回翻页结果。
+        优化点：
+        - 只统计可见题目，防止隐藏题目影响判断
+        - 检查URL、题目内容、页码文本、下一页按钮消失
+        - 日志详细，便于排查
         """
         import time
         from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
         import logging
 
         prev_url = driver.current_url
@@ -2319,8 +2320,7 @@ class WJXAutoFillApp:
 
         # 多种方式查找“下一页”按钮
         selectors = [
-            "#divNext a", "a[id*='NextPage']", "a[onclick*='next']", "button.next",
-            "a:contains('下一页')", "button:contains('下一页')"
+            "#divNext a", "a[id*='NextPage']", "a[onclick*='next']", "button.next"
         ]
         next_btn = None
         for sel in selectors:
