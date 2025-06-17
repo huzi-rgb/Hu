@@ -15,6 +15,7 @@ import numpy as np
 import requests
 import openai
 import json
+from ai_questionnaire_parser import ai_parse_questionnaire
 import os
 from typing import List, Dict, Any
 from selenium import webdriver
@@ -766,6 +767,19 @@ class WJXAutoFillApp:
         if family not in valid_families:
             self.font_family.set("楷体")
 
+    def run_ai_structured_analysis(self):
+        api_key = self.qingyan_api_key_entry.get().strip()
+        # 采集问卷结构
+        qlist = []
+        for qid, qtext in self.config["question_texts"].items():
+            opts = self.config["option_texts"].get(qid, [])
+            qlist.append({"text": qtext, "options": opts})
+        ai_result = ai_parse_questionnaire(qlist, api_key)
+        # ai_result["questions"]、ai_result["dimensions"] 可直接用于自动填充题型设置和维度分组
+        # 你可以自动刷新界面，用AI推荐的题型/分组/配置覆盖现有设置，或者让用户确认
+        # 也支持将json结构显示在AI分析tab
+        self.ai_analysis_text.delete(1.0, "end")
+        self.ai_analysis_text.insert("end", json.dumps(ai_result, ensure_ascii=False, indent=2))
     def _validate_font_size(self, value):
         try:
             v = int(value)
