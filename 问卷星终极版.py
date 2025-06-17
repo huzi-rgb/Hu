@@ -2301,116 +2301,102 @@ class WJXAutoFillApp:
 
     def auto_click_next_page(self, driver):
         """
-        增强版翻页函数：更全面的按钮定位，更可靠的翻页验证。
+        更鲁棒的问卷星翻页函数：多重检测，保证翻页成功才返回True，否则False。
         """
-        import logging
+        import time
         from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        import logging
 
-        def find_next_button():
-            """查找下一页按钮，多种定位策略"""
-            button_selectors = [
-                "#divNext a",  # 标准下一页
-                "#NextButton",  # 备选1
-                "a[onclick*='next']",  # 备选2
-                "input[value*='下一页']",  # 备选3
-                "button[onclick*='next']",  # 备选4
-                ".next-page",  # 备选5
-                "#btnNext",  # 备选6
-                ".button-next"  # 备选7
-            ]
+        # 记录翻页前页面特征
+        prev_url = driver.current_url
+        try:
+            main_questions = driver.find_elements(By.CSS_SELECTOR, ".div_question, .field, .question")
+            prev_q_texts = [q.text[:30] for q in main_questions] if main_questions else []
+        except Exception:
+            prev_q_texts = []
 
-            # 通过选择器查找
-            for selector in button_selectors:
-                try:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    for element in elements:
-                        if element.is_displayed():
-                            return element
-                except Exception:
-                    continue
-
-            # 通过文本内容查找
+        # 优先多种方式查找“下一页”按钮
+        selectors = [
+            "#divNext a", "a[id*='NextPage']", "a[onclick*='next']", "button.next",
+            "a:contains('下一页')", "button:contains('下一页')"
+        ]
+        next_btn = None
+        for sel in selectors:
             try:
-                elements = driver.find_elements(By.XPATH, "//*[contains(text(), '下一页') or contains(text(), 'Next')]")
-                for element in elements:
-                    if element.is_displayed():
-                        return element
+                btns = driver.find_elements(By.CSS_SELECTOR, sel)
+                for b in btns:
+                    if b.is_displayed() and b.is_enabled():
+                        next_btn = b
+                        break
+                if next_btn:
+                    break
+            except Exception:
+                continue
+        # 兜底：文本查找
+        if not next_btn:
+            try:
+                btns = driver.find_elements(By.XPATH, "//*[contains(text(),'下一页') or contains(text(),'Next')]")
+                for b in btns:
+                    if b.is_displayed() and b.is_enabled():
+                        next_btn = b
+                        break
             except Exception:
                 pass
 
-            return None
+        if not next_btn:
+            logging.warning("未找到下一页按钮")
+            return False
 
+        # 尝试点击
         try:
-            next_btn = find_next_button()
-            if not next_btn:
-                # 检查是否有"提交"按钮来确定是否真的是最后一页
-                submit_selectors = [
-                    "#submit_button",
-                    "#ctlNext",
-                    "input[value*='提交']",
-                    "a.submitbutton",
-                    "#btnSubmit"
-                ]
-
-                has_submit = False
-                for selector in submit_selectors:
-                    try:
-                        submit_btn = driver.find_element(By.CSS_SELECTOR, selector)
-                        if submit_btn.is_displayed():
-                            has_submit = True
-                            break
-                    except Exception:
-                        continue
-
-                if has_submit:
-                    logging.info("已到达最后一页")
-                    return False
-                else:
-                    logging.warning("未找到下一页按钮也未找到提交按钮，可能页面加载问题")
-                    return False
-
-            # 记录当前页面特征
-            current_url = driver.current_url
-            current_questions = len(driver.find_elements(By.CSS_SELECTOR, ".div_question, .field, .question"))
-
-            # 点击下一页按钮
+            driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", next_btn)
+            time.sleep(0.1)
+            next_btn.click()
+        except Exception:
             try:
-                driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", next_btn)
-                next_btn.click()
+                driver.execute_script("arguments[0].click();", next_btn)
+            except Exception as e:
+                logging.error(f"下一页按钮点击失败: {e}")
+                return False
+
+        # 动态检测页面变化（最多5秒，每0.2s检测一次）
+        start = time.time()
+        while time.time() - start < 5:
+            # 1. URL变化
+            if driver.current_url != prev_url:
+                logging.info("翻页成功：URL已变化")
+                return True
+            # 2. 题目内容变化
+            try:
+                new_questions = driver.find_elements(By.CSS_SELECTOR, ".div_question, .field, .question")
+                new_q_texts = [q.text[:30] for q in new_questions] if new_questions else []
+                if new_q_texts != prev_q_texts and new_q_texts:
+                    logging.info("翻页成功：题目内容已变化")
+                    return True
             except Exception:
-                try:
-                    driver.execute_script("arguments[0].click();", next_btn)
-                except Exception as e:
-                    logging.error(f"点击下一页按钮失败: {e}")
-                    return False
-
-            # 等待页面变化
-            for i in range(30):  # 最多等待3秒
-                try:
-                    # 检查URL变化
-                    if driver.current_url != current_url:
-                        return True
-
-                    # 检查题目数量变化
-                    new_questions = len(driver.find_elements(By.CSS_SELECTOR, ".div_question, .field, .question"))
-                    if new_questions != current_questions:
-                        return True
-
-                    # 检查新页面标识
-                    if driver.find_elements(By.CSS_SELECTOR, ".page-number, .page-index"):
-                        return True
-
-                except Exception:
-                    pass
-
-                time.sleep(0.1)
-
-            logging.warning("翻页后未检测到页面变化")
-            return False
-
-        except Exception as e:
-            logging.error(f"翻页操作异常: {e}")
-            return False
+                pass
+            # 3. 页码文本变化
+            page_source = driver.page_source
+            if any(word in page_source for word in ["第2页", "第3页", "Page 2", "Page 3", "下一页", "Next"]):
+                logging.info("翻页成功：检测到页码变化")
+                return True
+            # 4. 下一页按钮消失（有些模板最后一页“下一页”按钮直接消失）
+            try:
+                btns = driver.find_elements(By.CSS_SELECTOR, "#divNext a, a[id*='NextPage']")
+                if not any(b.is_displayed() for b in btns):
+                    logging.info("翻页成功：下一页按钮消失")
+                    return True
+            except Exception:
+                pass
+            # 5. 验证码出现
+            if any(word in page_source for word in ["验证码", "geetest_panel", "nc_iconfont"]):
+                logging.warning("出现验证码，翻页流程暂停")
+                return False
+            time.sleep(0.2)
+        logging.warning("翻页超时，页面未变化")
+        return False
 
     def safe_click(self, driver, element):
         """
@@ -2464,38 +2450,41 @@ class WJXAutoFillApp:
             logging.error(f"安全点击异常: {str(e)}")
             return False
 
-    def is_next_page_loaded(self, driver):
+    def is_next_page_loaded(self, driver, prev_url=None, prev_q_texts=None):
         """
-        极速检测新页面是否加载，不做任何sleep/wait，只做一次URL/元素/文本判断
+        更鲁棒的一次性检测，判断页面是否已翻页。
+        - prev_url: 翻页前的URL
+        - prev_q_texts: 翻页前题目文本列表
         """
         import logging
+        from selenium.webdriver.common.by import By
+
         try:
-            # 检查URL变化
-            if driver.current_url != self.previous_url:
-                logging.info("URL变化，翻页成功")
-                self.previous_url = driver.current_url
+            if prev_url and driver.current_url != prev_url:
+                logging.info("检测到URL已变化，已翻页")
                 return True
-            # 检查页面特征元素
-            for indicator in [".div_question", ".field", ".question", "#divNext", "#divSubmit", "div.ui-page",
-                              "li.active"]:
-                try:
-                    elements = driver.find_elements('css selector', indicator)
-                    if elements and elements[0].is_displayed():
-                        logging.info(f"检测到特征元素: {indicator}")
-                        return True
-                except Exception:
-                    continue
-            # 检查页面文本
-            page_source = driver.page_source.lower()
-            for text in ["第2页", "第3页", "第4页", "第5页", "下一页", "Page 2", "Page 3", "Page 4", "Page 5", "Next"]:
-                if text.lower() in page_source:
-                    logging.info(f"检测到页面文本: {text}")
+            # 题目内容变化
+            new_questions = driver.find_elements(By.CSS_SELECTOR, ".div_question, .field, .question")
+            new_q_texts = [q.text[:30] for q in new_questions] if new_questions else []
+            if prev_q_texts is not None and new_q_texts != prev_q_texts and new_q_texts:
+                logging.info("检测到题目内容变化，已翻页")
+                return True
+            # 页码文本
+            page_source = driver.page_source
+            if any(word in page_source for word in ["第2页", "第3页", "Page 2", "Page 3", "下一页", "Next"]):
+                logging.info("检测到页码变化，已翻页")
+                return True
+            # 下一页按钮消失
+            try:
+                btns = driver.find_elements(By.CSS_SELECTOR, "#divNext a, a[id*='NextPage']")
+                if not any(b.is_displayed() for b in btns):
+                    logging.info("下一页按钮消失，疑似已翻页")
                     return True
-            logging.warning("未检测到翻页成功迹象")
-            return False
+            except Exception:
+                pass
         except Exception as e:
-            logging.error(f"翻页验证失败: {str(e)}")
-            return False
+            logging.error(f"is_next_page_loaded检测异常: {e}")
+        return False
 
     def set_question_bias(self, q_type, direction, q_num, entries):
         """为单个题目设置偏左或偏右分布"""
@@ -2730,7 +2719,7 @@ class WJXAutoFillApp:
                 t.start()
                 self.threads.append(t)
 
-            # 启动进度更新线程
+            # 启动进度更新线程（不再传参）
             progress_thread = threading.Thread(target=self.update_progress, daemon=True)
             progress_thread.start()
 
@@ -2918,8 +2907,16 @@ class WJXAutoFillApp:
 
     def fill_survey(self, driver):
         """
-        改进翻页和提交逻辑的问卷填写函数
+        改进翻页和提交逻辑的问卷填写函数（带题目进度局部刷新）。
         """
+        import random
+        import time
+        import logging
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.common.exceptions import TimeoutException
+
         current_page = 1
         max_pages = 20  # 设置一个合理的最大页数限制
 
@@ -2973,7 +2970,9 @@ class WJXAutoFillApp:
                     continue
 
                 current_question = i + 1
-                self.update_progress(current_question, total_questions, current_page)
+                # 局部刷新题目进度条和状态文本
+                self.question_progress_var.set(int((current_question / total_questions) * 100))
+                self.question_status_var.set(f"第{current_page}页 题目:{current_question}/{total_questions}")
 
                 # 计算每题时间
                 if i == total_questions - 1:
@@ -4531,16 +4530,33 @@ class WJXAutoFillApp:
         canvas.bind("<Enter>", _bind_mousewheel)
         canvas.bind("<Leave>", _unbind_mousewheel)
 
-    def update_progress(self, current, total, current_page):
-        """更新题目进度显示"""
-        try:
-            progress = int((current / total) * 100) if total > 0 else 0
-            self.question_progress_var.set(progress)
-            self.question_status_var.set(f"第{current_page}页 题目:{current}/{total}")
-            if hasattr(self, "root"):
-                self.root.update_idletasks()
-        except Exception as e:
-            logging.error(f"更新进度出错: {str(e)}")
+    def update_progress(self):
+        """持续刷新整体进度条和状态栏"""
+        import time
+        while self.running:
+            try:
+                # 总体进度（份数进度条）
+                if self.config["target_num"] > 0:
+                    progress = (self.cur_num / self.config["target_num"]) * 100
+                    self.progress_var.set(progress)
+                status = "暂停中..." if self.paused else "运行中..."
+                status += f" 完成: {self.cur_num}/{self.config['target_num']}"
+                if self.cur_fail > 0:
+                    status += f" 失败: {self.cur_fail}"
+                self.status_var.set(status)
+                # 如果份数已完成，自动停止
+                if self.cur_num >= self.config["target_num"]:
+                    self.stop_filling()
+                    import tkinter.messagebox
+                    tkinter.messagebox.showinfo("完成", "问卷填写完成！")
+                    break
+                # 保证界面刷新
+                if hasattr(self, "root"):
+                    self.root.update_idletasks()
+            except Exception as e:
+                import logging
+                logging.error(f"更新进度时出错: {str(e)}")
+            time.sleep(0.5)
 
     def is_filled(self, question):
         """检查问题是否已填写"""
