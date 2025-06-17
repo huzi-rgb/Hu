@@ -2908,6 +2908,7 @@ class WJXAutoFillApp:
     def fill_survey(self, driver):
         """
         改进版：填写问卷，题目进度条按“实际可见题数”显示，避免统计错误，防死循环/多处理第一页。
+        修正版：用页面内容判重，支持多页URL不变场景。
         """
         import random
         import time
@@ -2919,7 +2920,8 @@ class WJXAutoFillApp:
 
         current_page = 1
         max_pages = 20  # 设置一个合理的最大页数限制
-        processed_urls = set()  # 防止重复处理同一页
+
+        processed_signatures = set()  # 用于判重，多页URL不变时内容不同也能识别
 
         while current_page <= max_pages and self.running:
             logging.info(f"正在处理第 {current_page} 页问卷")
@@ -2948,13 +2950,13 @@ class WJXAutoFillApp:
             ]
             total_questions = len(questions)
 
-            # 检查是否重复处理同一页
-            cur_url = driver.current_url
-            # 只要页面内容没变就跳出，防止死循环
-            if cur_url in processed_urls:
+            # ==== 修改点：用页面内容hash判重 ====
+            cur_page_signature = "|".join([q.text.strip()[:30] for q in questions])
+            if cur_page_signature in processed_signatures:
                 logging.warning("检测到重复页面，跳出循环避免死循环")
                 break
-            processed_urls.add(cur_url)
+            processed_signatures.add(cur_page_signature)
+            # ==== 结束 ====
 
             # 如果没有题目，尝试点击下一页或直接退出
             if total_questions == 0:
