@@ -4,6 +4,7 @@ from tkinter import ttk, scrolledtext, messagebox, filedialog
 import threading
 import logging
 import random
+import webbrowser
 import re
 import traceback
 import time
@@ -47,9 +48,8 @@ DEFAULT_CONFIG = {
     "batch_pause": 15,  # 批量暂停M分钟
     "per_page_delay": (2.0, 6.0),
     "enable_smart_gap": True,  # 智能提交间隔开关
-    "use_ip": False,
+
     "headless": False,
-    "ip_api": "https://service.ipzan.com/core-extract?num=1&minute=1&pool=quality&secret=YOUR_SECRET",
     "num_threads": 4,
     "use_ip": False,
     "ip_api": "https://service.ipzan.com/core-extract?num=1&minute=1&pool=quality&secret=YOUR_SECRET",
@@ -57,9 +57,6 @@ DEFAULT_CONFIG = {
     "ip_change_batch": 5,  # 每N份切换, 仅per_batch有效
 
 
-    "ai_fill_enabled": False,
-    "openai_api_key": "",
-    "ai_prompt_template": "请用简洁、自然的中文回答：{question}",
     # 单选题概率配置
     "single_prob": {
         "1": -1,  # -1表示随机选择
@@ -84,7 +81,11 @@ DEFAULT_CONFIG = {
             "max_selection": 3
         }
     },
-
+    "ai_service": "质谱清言",
+    "ai_fill_enabled": False,
+    "openai_api_key": "",
+    "qingyan_api_key": "",
+    "ai_prompt_template": "请用简洁、自然的中文回答：{question}",
     # 矩阵题概率配置
     "matrix_prob": {
         "6": [0.2, 0.3, 0.5],  # 每行选项的选择概率
@@ -142,7 +143,8 @@ DEFAULT_CONFIG = {
         "15": "您的出生地",
         "16": "您的职业"
     },
-
+    "page_load_timeout": 20,  # 页面加载超时时间(秒)
+    "element_timeout": 10,# 元素查找超时时间(秒)
     # 选项文本存储
     "option_texts": {
         "1": ["男", "女"],
@@ -459,7 +461,7 @@ class WJXAutoFillApp:
         logging.info("应用程序已启动")
 
     def create_global_settings(self):
-        """创建全局设置界面，包括智能提交间隔和批量休息设置，并支持鼠标滚轮滚动"""
+        """创建全局设置界面，包括智能提交间隔和批量休息设置，并支持鼠标滚轮滚动（支持字体字号手输且自动校验）"""
         frame = self.global_frame
         padx, pady = 8, 5
 
@@ -475,7 +477,6 @@ class WJXAutoFillApp:
 
         canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
         canvas.configure(yscrollcommand=scrollbar.set)
-
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
@@ -488,7 +489,6 @@ class WJXAutoFillApp:
             elif event.num == 5:
                 canvas.yview_scroll(1, "units")
 
-        # 鼠标进入canvas时绑定滚轮，离开时解绑，防止全局影响
         def _bind_mousewheel(event):
             canvas.bind_all("<MouseWheel>", _on_mousewheel)
             canvas.bind_all("<Button-4>", _on_mousewheel)
@@ -507,15 +507,23 @@ class WJXAutoFillApp:
         font_frame.grid(row=0, column=0, columnspan=2, padx=padx, pady=pady, sticky=tk.EW)
 
         ttk.Label(font_frame, text="字体选择:").grid(row=0, column=0, padx=padx, pady=pady, sticky=tk.W)
-        font_options = tkfont.families()
-        font_menu = ttk.Combobox(font_frame, textvariable=self.font_family, values=font_options, width=15)
-        font_menu.grid(row=0, column=1, padx=padx, pady=pady, sticky=tk.W)
-        font_menu.set("楷体")
+        font_options = sorted(tkfont.families())
+        self.font_menu = ttk.Combobox(font_frame, textvariable=self.font_family, values=font_options, width=15,
+                                      state="normal")
+        self.font_menu.grid(row=0, column=1, padx=padx, pady=pady, sticky=tk.W)
+        self.font_menu.set("楷体")
+        self.font_menu.bind("<FocusOut>", self._validate_font_family)
+        self.font_menu.bind("<<ComboboxSelected>>", self._validate_font_family)
 
         ttk.Label(font_frame, text="字体大小:").grid(row=0, column=2, padx=padx, pady=pady, sticky=tk.W)
-        font_size_spinbox = ttk.Spinbox(font_frame, from_=8, to=24, increment=1, textvariable=self.font_size, width=5)
-        font_size_spinbox.grid(row=0, column=3, padx=padx, pady=pady, sticky=tk.W)
-        font_size_spinbox.set(16)
+        self.font_size_spinbox = ttk.Spinbox(
+            font_frame, from_=8, to=24, increment=1,
+            textvariable=self.font_size, width=5,
+            validate='focusout',
+            validatecommand=(font_frame.register(self._validate_font_size), '%P')
+        )
+        self.font_size_spinbox.grid(row=0, column=3, padx=padx, pady=pady, sticky=tk.W)
+        self.font_size_spinbox.set(16)
 
         # ======== 问卷设置 ========
         survey_frame = ttk.LabelFrame(scrollable_frame, text="问卷设置")
@@ -618,10 +626,14 @@ class WJXAutoFillApp:
         # ======== 高级设置 ========
         advanced_frame = ttk.LabelFrame(scrollable_frame, text="高级设置")
         advanced_frame.grid(row=4, column=0, columnspan=2, padx=padx, pady=pady, sticky=tk.EW)
+
+        # 第0行：浏览器窗口数量
         ttk.Label(advanced_frame, text="浏览器窗口数量:").grid(row=0, column=0, padx=padx, pady=pady, sticky=tk.W)
         self.num_threads = ttk.Spinbox(advanced_frame, from_=1, to=10, width=5)
         self.num_threads.grid(row=0, column=1, padx=padx, pady=pady, sticky=tk.W)
         self.num_threads.set(self.config["num_threads"])
+
+        # 第1行：代理IP设置
         self.use_ip_var = tk.BooleanVar(value=self.config["use_ip"])
         ttk.Checkbutton(advanced_frame, text="使用代理IP", variable=self.use_ip_var).grid(
             row=1, column=0, padx=padx, pady=pady, sticky=tk.W)
@@ -629,6 +641,8 @@ class WJXAutoFillApp:
         self.ip_entry = ttk.Entry(advanced_frame, width=40)
         self.ip_entry.grid(row=1, column=2, columnspan=3, padx=padx, pady=pady, sticky=tk.EW)
         self.ip_entry.insert(0, self.config["ip_api"])
+
+        # 第2行：代理切换设置
         ttk.Label(advanced_frame, text="代理切换:").grid(row=2, column=0, padx=padx, pady=pady, sticky=tk.W)
         self.ip_change_mode = ttk.Combobox(advanced_frame, values=["per_submit", "per_batch"], width=12)
         self.ip_change_mode.grid(row=2, column=1, padx=padx, pady=pady, sticky=tk.W)
@@ -637,40 +651,61 @@ class WJXAutoFillApp:
         self.ip_change_batch = ttk.Spinbox(advanced_frame, from_=1, to=100, width=5)
         self.ip_change_batch.grid(row=2, column=3, padx=padx, pady=pady, sticky=tk.W)
         self.ip_change_batch.set(self.config.get("ip_change_batch", 5))
+
+        # 第3行：无头模式设置
         self.headless_var = tk.BooleanVar(value=self.config["headless"])
         ttk.Checkbutton(advanced_frame, text="无头模式(不显示浏览器)", variable=self.headless_var).grid(
             row=3, column=0, padx=padx, pady=pady, sticky=tk.W)
-        # 高级设置区域
+
+        # 第4行：启用AI答题
         self.ai_fill_var = tk.BooleanVar(value=self.config.get("ai_fill_enabled", False))
         ttk.Checkbutton(advanced_frame, text="启用AI自动答题（填空题）", variable=self.ai_fill_var).grid(
-            row=4, column=0, padx=padx, pady=pady, sticky=tk.W)
+            row=4, column=0, padx=padx, pady=pady, sticky=tk.W, columnspan=2)
 
-        # 质谱清言API Key输入
-        ttk.Label(advanced_frame, text="质谱清言 API Key:").grid(row=4, column=1, padx=padx, pady=pady, sticky=tk.W)
+        # ======== AI服务设置 ========
+        # 第5行：AI服务选择
+        ttk.Label(advanced_frame, text="AI服务:").grid(row=5, column=0, padx=padx, pady=pady, sticky=tk.W)
+        self.ai_service = ttk.Combobox(advanced_frame, values=["质谱清言", "OpenAI"], width=10)
+        self.ai_service.grid(row=5, column=1, padx=padx, pady=pady, sticky=tk.W)
+        self.ai_service.set(self.config.get("ai_service", "质谱清言"))
+
+        # 第6行：质谱清言API Key
+        # 使用正确的变量名 - 删除_label后缀
+        self.qingyan_api_key_label = ttk.Label(advanced_frame, text="质谱清言 API Key:")  # 添加此行
+        self.qingyan_api_key_label.grid(row=6, column=0, padx=padx, pady=pady, sticky=tk.W)
         self.qingyan_api_key_entry = ttk.Entry(advanced_frame, width=40)
-        self.qingyan_api_key_entry.grid(row=4, column=2, columnspan=2, padx=padx, pady=pady, sticky=tk.EW)
+        self.qingyan_api_key_entry.grid(row=6, column=1, columnspan=2, padx=padx, pady=pady, sticky=tk.EW)
 
-        # 添加API Key获取链接
-        api_link = ttk.Label(advanced_frame, text="获取API Key", foreground="blue", cursor="hand2")
-        api_link.grid(row=4, column=4, padx=5, pady=pady)
-        api_link.bind("<Button-1>", lambda e: webbrowser.open("https://open.bigmodel.cn/usercenter/apikeys"))
+        # 获取API Key链接（放在质谱清言行）
+        self.api_link = ttk.Label(advanced_frame, text="获取API Key", foreground="blue", cursor="hand2")  # 添加此行
+        self.api_link.grid(row=6, column=3, padx=5, pady=pady)
+        self.api_link.bind("<Button-1>", lambda e: webbrowser.open("https://open.bigmodel.cn/usercenter/apikeys"))
 
-        # Prompt下拉框
-        ttk.Label(advanced_frame, text="AI答题Prompt模板:").grid(row=5, column=0, padx=padx, pady=pady, sticky=tk.W)
+        # 第7行：OpenAI API Key
+        # 使用正确的变量名 - 删除_label后缀
+        self.openai_api_key_label = ttk.Label(advanced_frame, text="OpenAI API Key:")  # 添加此行
+        self.openai_api_key_label.grid(row=7, column=0, padx=padx, pady=pady, sticky=tk.W)
+        self.openai_api_key_entry = ttk.Entry(advanced_frame, width=40)
+        self.openai_api_key_entry.grid(row=7, column=1, columnspan=2, padx=padx, pady=pady, sticky=tk.EW)
+
+        # 第8行：AI答题Prompt模板
+        self.ai_prompt_label = ttk.Label(advanced_frame, text="AI答题Prompt模板:")  # 添加此行
+        self.ai_prompt_label.grid(row=8, column=0, padx=padx, pady=pady, sticky=tk.W)
         self.ai_prompt_var = tk.StringVar()
         self.ai_prompt_combobox = ttk.Combobox(
             advanced_frame, textvariable=self.ai_prompt_var, width=60, state="normal"
         )
-        self.ai_prompt_combobox.grid(row=5, column=1, columnspan=2, padx=padx, pady=pady, sticky=tk.EW)
+        self.ai_prompt_combobox.grid(row=8, column=1, columnspan=2, padx=padx, pady=pady, sticky=tk.EW)
         self.ai_prompt_combobox['values'] = [
             self.config.get("ai_prompt_template", "请用简洁、自然的中文回答：{question}")]
         self.ai_prompt_combobox.set(self.config.get("ai_prompt_template", "请用简洁、自然的中文回答：{question}"))
 
-        # 只保留这个按钮
-        ttk.Button(
+        # 重新生成Prompt按钮
+        self.refresh_prompt_btn = ttk.Button(  # 添加此行
             advanced_frame, text="重新生成Prompt(质谱清言)",
             command=self.on_refresh_qingyan_prompts
-        ).grid(row=5, column=3, padx=5, pady=pady)
+        )
+        self.refresh_prompt_btn.grid(row=8, column=3, padx=5, pady=pady)
 
         # ======== 操作按钮 ========
         button_frame = ttk.Frame(scrollable_frame)
@@ -684,6 +719,59 @@ class WJXAutoFillApp:
         tip_label = ttk.Label(scrollable_frame, text="提示: 填写前请先解析问卷以获取题目结构", style='Warning.TLabel')
         tip_label.grid(row=6, column=0, columnspan=2, pady=(10, 0))
 
+        # 添加AI服务切换事件绑定
+        self.ai_service.bind("<<ComboboxSelected>>", self.on_ai_service_change)
+        # 初始化UI状态
+        self.on_ai_service_change()
+
+    def on_ai_service_change(self, event=None):
+        """动态显示/隐藏API Key输入框 - 修复版"""
+        service = self.ai_service.get()
+
+        # 使用grid_forget()完全移除旧布局
+        self.qingyan_api_key_label.grid_forget()
+        self.qingyan_api_key_entry.grid_forget()
+        self.api_link.grid_forget()
+        self.openai_api_key_label.grid_forget()
+        self.openai_api_key_entry.grid_forget()
+
+        if service == "OpenAI":
+            # 重新布局OpenAI相关控件
+            self.openai_api_key_label.grid(row=7, column=0, padx=5, pady=5, sticky=tk.W)
+            self.openai_api_key_entry.grid(row=7, column=1, columnspan=2, padx=5, pady=5, sticky=tk.EW)
+
+            # 修改提示文本
+            self.refresh_prompt_btn.config(text="重新生成Prompt(OpenAI)")
+        else:
+            # 重新布局质谱清言相关控件
+            self.qingyan_api_key_label.grid(row=6, column=0, padx=5, pady=5, sticky=tk.W)
+            self.qingyan_api_key_entry.grid(row=6, column=1, columnspan=2, padx=5, pady=5, sticky=tk.EW)
+            self.api_link.grid(row=6, column=3, padx=5, pady=5)
+
+            # 恢复按钮文本
+            self.refresh_prompt_btn.config(text="重新生成Prompt(质谱清言)")
+
+        # 确保布局更新
+        self.advanced_frame.update_idletasks()
+    def _validate_font_family(self, event=None):
+        family = self.font_family.get()
+        valid_families = set(tkfont.families())
+        # 限长防止撑界面
+        if len(family) > 32:
+            family = family[:32]
+            self.font_family.set(family)
+        if family not in valid_families:
+            self.font_family.set("楷体")
+
+    def _validate_font_size(self, value):
+        try:
+            v = int(value)
+            if 8 <= v <= 24:
+                return True
+        except Exception:
+            pass
+        self.font_size.set("16")
+        return False
     def generate_prompt_templates_by_qingyan(self, question_texts, api_key):
         import requests
 
@@ -693,16 +781,16 @@ class WJXAutoFillApp:
         # 构建Prompt要求
         prompt = (
             f"你是问卷填写专家，需要为以下问卷题目生成答题人设和答题风格：\n{question_samples}\n"
-            "请根据题目内容，创造15-20个不同的真实答题人设，每个包含性别、年龄、职业、地域等细节。"
+            "请根据题目内容，创造20-30个不同的真实答题人设，每个包含性别、年龄、职业、地域、教育背景、收入水平等细节。"
             "为每个人设生成1条答题Prompt，要求：\n"
-            "1. 人设真实自然，但每个人设要求填写问卷极简。\n"
-            "2. 如果题目涉及金额、年龄、数量、百分比等，只输出纯数字或简单单位（如'1000'、'22'、'3年'、'3000元'、'50%'），不要多余说明。\n"
-            "3. 如果是主观题或无特别答案，输出如'无'、'不知道'、'一般'、'还行'、'没有'、'不清楚'、'都可以'等极简短语即可。\n"
-            "4. 不要花哨口头禅，不要复述题干，不要任何多余修饰和口语化。\n"
-            "5. 严禁出现'AI'、'助手'等非人类词汇。\n"
-            "6. 格式为：你是[人设]，请用极简风格直接作答：{question}\n"
-            "示例1：你是22岁的重庆女生，大三学生。请用极简数字/短语回答：{question}\n"
-            "示例2：你是35岁的杭州程序员，有个5岁女儿。请直接用'无'或数字回答：{question}\n"
+            "1. 人设真实自然，符合中国社会各阶层特征\n"
+            "2. 答案必须极简：数字题只输出数字，选择题只输出选项字母或编号\n"
+            "3. 主观题答案不超过5个字（如'满意'、'一般'、'不同意'）\n"
+            "4. 涉及隐私信息（姓名/电话）时生成合理虚构数据\n"
+            "5. 不要任何解释性文字，不要重复题干\n"
+            "6. 格式：'你是[人设]，请直接作答：{question}'\n"
+            "示例1：你是28岁杭州程序员，月入1.5万，已婚有房贷。请直接作答：{question}\n"
+            "示例2：你是19岁广州女大学生，月消费2000元。请直接作答：{question}\n"
             "直接输出Prompt列表，每行一条，不要编号。"
         )
 
@@ -970,50 +1058,75 @@ class WJXAutoFillApp:
 
     def zhipu_generate_answer(self, question: str, api_key: str, prompt_template: str) -> str:
         """
-        根据身份生成极简自然的问卷答案（只输出数字或极短短语，无身份前缀）
+        优化版AI答题 - 支持题型识别和格式控制
         """
-        import requests
-
+        import re
+        import logging
 
         # 1. 提取人设
         identity = self.extract_identity_from_prompt(prompt_template)
 
-        # 2. 构建全新Prompt：身份只作角色背景，回答必须极简
+        # 2. 题型识别与格式控制
+        format_rules = ""
+        if re.search(r'年龄|岁数|多大', question):
+            format_rules = "请只回答数字（如'25'），不要任何文字说明。"
+        elif re.search(r'金额|价格|费用|收入|支出|消费', question):
+            format_rules = "请只回答数字（如'5000'或'1.2万'），可带简单单位。"
+        elif re.search(r'日期|时间|何时|时候', question):
+            format_rules = "请按'YYYY-MM-DD'或'X年前'格式回答。"
+        elif re.search(r'评分|打分|评价|满意度', question):
+            format_rules = "请用1-10的数字回答。"
+        elif re.search(r'姓名|称呼', question):
+            format_rules = "请生成常见中文姓名。"
+        elif re.search(r'电话|手机|联系方式', question):
+            format_rules = "请生成13开头的手机号。"
+
+        # 3. 构建Prompt
         full_prompt = (
-            f"你现在的身份是：{identity}。请仅用数字或极简短语（如“无”、“不知道”、“还行”、“一般”），直接回答下面的问题，不要解释，不要复述题干：\n"
-            f"{question}"
+            f"你现在的身份是：{identity}。请严格按以下要求回答：\n"
+            f"1. 只输出最终答案，不要任何解释\n"
+            f"2. 答案长度不超过10个字\n"
+            f"3. {format_rules}\n"
+            f"问题：{question}"
         )
 
-        # 3. API请求
+        # 4. API请求（增加超时和重试）
         try:
             url = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
             headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
             data = {
                 "model": "glm-4",
                 "messages": [{"role": "user", "content": full_prompt}],
-                "max_tokens": 100,  # 保证极简
-                "temperature": 0.7
+                "max_tokens": 50,  # 限制长度
+                "temperature": 0.3,  # 降低随机性
+                "top_p": 0.8
             }
-            response = requests.post(url, headers=headers, json=data, timeout=10)
-            response.raise_for_status()
-            result = response.json()
-            content = (
-                result.get("choices", [{}])[0]
-                .get("message", {})
-                .get("content", "")
-                .strip()
-            )
 
-            # 4. 答案后处理：去身份前缀、去多余修饰、只留数字/极短短语
-            content = self.simplify_answer(content)
+            # 增加重试机制
+            for attempt in range(3):
+                try:
+                    response = requests.post(url, headers=headers, json=data, timeout=15)
+                    response.raise_for_status()
+                    result = response.json()
+                    content = (
+                        result.get("choices", [{}])[0]
+                        .get("message", {})
+                        .get("content", "")
+                        .strip()
+                    )
 
-            # 如答案依然过长或为空，用备选答案兜底
-            if not content or len(content) > 10:
-                return self.get_identity_answer(identity)
-            return content
+                    # 5. 答案后处理
+                    return self.simplify_answer(content, question)
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+                    if attempt < 2:
+                        time.sleep(1.5)
+                        continue
+                    else:
+                        raise
+        except Exception as e:
+            logging.error(f"AI答题失败: {str(e)}")
 
-        except Exception:
-            return self.get_identity_answer(identity)
+        return self.get_identity_answer(identity, question)
 
     def extract_identity_from_prompt(self, prompt_template: str) -> str:
         """从Prompt模板提取身份（只保留“xx岁xx职业/地区/性别”这种）"""
@@ -1024,40 +1137,88 @@ class WJXAutoFillApp:
             return match.group(1).split("，请")[0].strip()
         return "用户"
 
-    def simplify_answer(self, answer: str) -> str:
-        """去掉AI的修饰语，只留极简答案（数字/短词）"""
+    def simplify_answer(self, answer: str, question: str) -> str:
+        """答案后处理 - 增强版（按题型优化）"""
         import re
-        answer = answer.strip()
-        # 去除“我觉得”“我认为”等
-        answer = re.sub(r"^(我[觉得认为看]|作为[^，。]*)[，。]?", "", answer)
-        # 去除身份前缀
-        answer = re.sub(r"^[\u4e00-\u9fa5a-zA-Z0-9]+[:：]", "", answer)
-        # 只保留第一个短句、数字或极短短语
-        answer = re.split(r"[，,。！!？?；;]", answer)[0]
-        if len(answer) > 10:
-            answer = answer[:10]
-        return answer.strip()
 
-    def get_identity_answer(self, identity: str) -> str:
-        """备选答案池：按不同身份返回极简短语/数字"""
+        # 移除所有标点符号和多余空格
+        answer = re.sub(r'[^\w\u4e00-\u9fa5]', ' ', answer).strip()
+
+        # 题型特定处理
+        if re.search(r'年龄|岁数|多大', question):
+            # 提取数字
+            match = re.search(r'\d{1,2}', answer)
+            return match.group(0) if match else "30"
+
+        elif re.search(r'金额|价格|费用|收入|支出|消费', question):
+            # 提取数字和单位
+            match = re.search(r'(\d+\.?\d*)(万?元?)', answer)
+            if match:
+                num, unit = match.groups()
+                return f"{num}{unit}" if unit else num
+            return "5000"
+
+        elif re.search(r'日期|时间|何时|时候', question):
+            # 标准化日期格式
+            if re.match(r'\d{4}-\d{1,2}-\d{1,2}', answer):
+                return answer
+            return "2023-01-01"
+
+        elif re.search(r'评分|打分|评价|满意度', question):
+            # 确保1-10分
+            match = re.search(r'\d+', answer)
+            if match:
+                score = min(10, max(1, int(match.group(0))))
+                return str(score)
+            return "7"
+
+        elif re.search(r'姓名|称呼', question):
+            # 保留中文姓名
+            match = re.search(r'[\u4e00-\u9fa5]{2,3}', answer)
+            return match.group(0) if match else "张三"
+
+        elif re.search(r'电话|手机|联系方式', question):
+            # 生成有效手机号
+            match = re.search(r'1[3-9]\d{9}', answer)
+            return match.group(0) if match else "13800138000"
+
+        # 通用处理：取第一个有效片段
+        parts = answer.split()
+        return parts[0][:15] if parts else "无"
+
+    def get_identity_answer(self, identity: str, question: str) -> str:
+        """备选答案池 - 按题目类型优化"""
         import random
-        pools = {
-            "学生": ["无", "不知道", "一般", "还行", "1000", "500", "偶尔", "3年"],
-            "上班族": ["还行", "一般", "3000", "5000", "无", "偶尔", "常用"],
-            "老师": ["2000", "满意", "偶尔", "无", "一般", "还行"],
-            "程序员": ["8000", "3000", "常用", "偶尔", "无", "还行"],
-            "宝妈": ["还行", "一般", "无", "偶尔", "3000"],
-            "老人": ["无", "1000", "偶尔", "一般"],
-            "青少年": ["100", "无", "偶尔", "还行"],
-            "中年人": ["5000", "无", "偶尔", "一般"],
-            "男士": ["3000", "无", "偶尔", "还行"],
-            "女士": ["2000", "无", "偶尔", "一般"],
-            "用户": ["无", "还行", "一般", "不知道", "1000"],
+
+        # 按题型分类的答案池
+        answer_pools = {
+            "age": [str(i) for i in range(18, 65)],
+            "income": ["5000", "8000", "10000", "15000", "20000", "30000"],
+            "rating": [str(i) for i in range(1, 11)],
+            "date": ["2020-01-01", "2021-05-15", "2022-07-20", "2023-03-10"],
+            "name": ["李明", "张伟", "王芳", "刘洋", "陈静", "赵强"],
+            "phone": ["13800138000", "13912345678", "13787654321", "13511223344"],
+            "bool": ["是", "否", "有", "无", "满意", "不满意", "同意", "不同意"],
+            "default": ["无", "不知道", "一般", "还行", "3年", "5次", "1000元"]
         }
-        for k in pools:
-            if k in identity:
-                return random.choice(pools[k])
-        return random.choice(pools["用户"])
+
+        # 题目类型识别
+        if re.search(r'年龄|岁数|多大', question):
+            return random.choice(answer_pools["age"])
+        elif re.search(r'金额|价格|收入|支出|消费', question):
+            return random.choice(answer_pools["income"])
+        elif re.search(r'评分|打分|评价|满意度', question):
+            return random.choice(answer_pools["rating"])
+        elif re.search(r'日期|时间|何时|时候', question):
+            return random.choice(answer_pools["date"])
+        elif re.search(r'姓名|称呼', question):
+            return random.choice(answer_pools["name"])
+        elif re.search(r'电话|手机|联系方式', question):
+            return random.choice(answer_pools["phone"])
+        elif re.search(r'是否|有没有|同意吗', question):
+            return random.choice(answer_pools["bool"])
+
+        return random.choice(answer_pools["default"])
 
     def fill_associated_textbox(
             self, driver, question, option_element,
@@ -2136,82 +2297,230 @@ class WJXAutoFillApp:
 
     def auto_click_next_page(self, driver):
         """
-        自动查找并点击“下一页”、“继续”、“开始答题”等按钮，适用于封面语和分页场景。
-        返回是否找到并已点击。
+        增强版翻页按钮识别功能
+        支持多种翻页按钮类型：下一页、继续、开始答题等
         """
-        BUTTON_TEXTS = ["下一页", "继续", "开始答题", "进入问卷", "我已知晓", "同意", "开始", "下一步"]
-        try:
-            # 1. 优先找button/a标签
-            for text in BUTTON_TEXTS:
-                # button
-                buttons = driver.find_elements(By.XPATH, f"//button[contains(text(), '{text}')]")
+        import time
+        from selenium.webdriver.common.by import By
+        from selenium.common.exceptions import ElementClickInterceptedException, NoSuchElementException
+
+        # 保存当前URL用于后续验证
+        if not hasattr(self, 'previous_url'):
+            self.previous_url = driver.current_url
+
+        # 定义所有可能的翻页按钮文本
+        BUTTON_TEXTS = [
+            "下一页", "继续", "开始答题", "进入问卷", "我已知晓",
+            "同意", "开始", "下一步", "提交", "确定", "完成",
+            "Next", "Continue", "Submit", "Start"
+        ]
+
+        # 定义所有可能的翻页按钮CSS选择器
+        BUTTON_SELECTORS = [
+            ".next-page", ".nextBtn", ".btn-next", ".btn-continue",
+            ".btn-start", ".start-btn", "#ctlNext", "#submit_button",
+            ".submit-btn", ".submitbutton", ".btn-submit", ".btn-success",
+            "#next_button", ".next-button", "#submit_btn", "button[type='submit']",
+            "input[type='submit']", "a.next", "div.next", "span.next"
+        ]
+
+        # 方法1：通过按钮文本查找
+        for text in BUTTON_TEXTS:
+            try:
+                # 尝试按钮元素
+                buttons = driver.find_elements(By.XPATH, f"//button[contains(., '{text}')]")
                 for btn in buttons:
                     if btn.is_displayed() and btn.is_enabled():
-                        try:
-                            driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
-                                                  btn)
-                            btn.click()
-                            time.sleep(2)
+                        if self.safe_click(driver, btn):
+                            logging.info(f"通过文本按钮点击: {text}")
                             return True
-                        except:
-                            continue
-                # a标签
-                alinks = driver.find_elements(By.XPATH, f"//a[contains(text(), '{text}')]")
-                for a in alinks:
-                    if a.is_displayed() and a.is_enabled():
-                        try:
-                            driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
-                                                  a)
-                            a.click()
-                            time.sleep(2)
+
+                # 尝试链接元素
+                links = driver.find_elements(By.XPATH, f"//a[contains(., '{text}')]")
+                for link in links:
+                    if link.is_displayed() and link.is_enabled():
+                        if self.safe_click(driver, link):
+                            logging.info(f"通过文本链接点击: {text}")
                             return True
-                        except:
-                            continue
-                # input[type=button]
-                inputs = driver.find_elements(By.XPATH, f"//input[@type='button' and contains(@value,'{text}')]")
+
+                # 尝试输入按钮
+                inputs = driver.find_elements(By.XPATH, f"//input[@type='button' and contains(@value, '{text}')]")
                 for inp in inputs:
                     if inp.is_displayed() and inp.is_enabled():
-                        try:
-                            driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
-                                                  inp)
-                            inp.click()
-                            time.sleep(2)
+                        if self.safe_click(driver, inp):
+                            logging.info(f"通过输入按钮点击: {text}")
                             return True
-                        except:
-                            continue
-            # 2. 特殊class（有些问卷平台用自定义div/button）
-            next_classes = [".next-page", ".nextBtn", ".btn-next", ".btn-continue", ".btn-start", ".start-btn"]
-            for cls in next_classes:
-                elems = driver.find_elements(By.CSS_SELECTOR, cls)
-                for elem in elems:
+
+            except Exception as e:
+                logging.debug(f"文本查找失败: {text}, 错误: {str(e)}")
+                continue
+
+        # 方法2：通过CSS选择器查找
+        for selector in BUTTON_SELECTORS:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                for elem in elements:
                     if elem.is_displayed() and elem.is_enabled():
-                        try:
-                            driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
-                                                  elem)
-                            elem.click()
-                            time.sleep(2)
+                        if self.safe_click(driver, elem):
+                            logging.info(f"通过CSS选择器点击: {selector}")
                             return True
-                        except:
-                            continue
-            # 3. 万能法：找所有可见button/a，文本模糊匹配
-            all_btns = driver.find_elements(By.XPATH, "//button|//a|//input[@type='button']")
-            for btn in all_btns:
-                try:
+            except Exception as e:
+                logging.debug(f"选择器查找失败: {selector}, 错误: {str(e)}")
+                continue
+
+        # 方法3：通过父容器查找
+        try:
+            containers = driver.find_elements(By.CSS_SELECTOR, ".footer, .page-footer, .submit-area, .button-container")
+            for container in containers:
+                buttons = container.find_elements(By.TAG_NAME, "button")
+                for btn in buttons:
                     if btn.is_displayed() and btn.is_enabled():
-                        text = btn.text or btn.get_attribute("value") or ""
-                        for key in BUTTON_TEXTS:
-                            if key in text:
-                                driver.execute_script(
-                                    "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", btn)
-                                btn.click()
-                                time.sleep(2)
+                        if self.safe_click(driver, btn):
+                            logging.info("通过容器内按钮点击")
+                            return True
+
+                inputs = container.find_elements(By.CSS_SELECTOR, "input[type='button'], input[type='submit']")
+                for inp in inputs:
+                    if inp.is_displayed() and inp.is_enabled():
+                        if self.safe_click(driver, inp):
+                            logging.info("通过容器内输入框点击")
+                            return True
+        except Exception as e:
+            logging.debug(f"容器查找失败: {str(e)}")
+
+        # 方法4：模糊匹配所有按钮
+        try:
+            all_buttons = driver.find_elements(By.CSS_SELECTOR, "button, a, input[type='button'], input[type='submit']")
+            for btn in all_buttons:
+                try:
+                    text = btn.text.lower() or btn.get_attribute("value", "").lower() or ""
+                    if any(keyword in text for keyword in
+                           ["next", "continue", "submit", "start", "page", "下一步", "继续", "提交"]):
+                        if btn.is_displayed() and btn.is_enabled():
+                            if self.safe_click(driver, btn):
+                                logging.info(f"通过模糊匹配点击: {text[:20]}...")
                                 return True
-                except:
+                except Exception:
                     continue
         except Exception as e:
-            import logging
-            logging.warning(f"自动点击下一页按钮时出错: {e}")
+            logging.debug(f"模糊匹配失败: {str(e)}")
+
+        logging.warning("未找到有效的翻页按钮")
         return False
+
+    def safe_click(self, driver, element):
+        """
+        安全点击元素，处理各种点击异常情况
+        """
+        import time
+        from selenium.common.exceptions import ElementClickInterceptedException
+
+        try:
+            # 滚动元素到视图中央
+            driver.execute_script(
+                "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center', inline: 'center'});",
+                element
+            )
+            time.sleep(0.5)
+
+            # 尝试直接点击
+            try:
+                element.click()
+                time.sleep(1)  # 等待页面响应
+                return True
+            except ElementClickInterceptedException:
+                # 处理被遮挡的情况
+                try:
+                    # 尝试点击元素的中心点
+                    location = element.location
+                    size = element.size
+                    x = location['x'] + size['width'] // 2
+                    y = location['y'] + size['height'] // 2
+
+                    actions = ActionChains(driver)
+                    actions.move_to_element_with_offset(element, 0, 0)
+                    actions.move_by_offset(size['width'] // 2, size['height'] // 2)
+                    actions.click()
+                    actions.perform()
+                    time.sleep(1)
+                    return True
+                except Exception:
+                    # 最后尝试JavaScript点击
+                    try:
+                        driver.execute_script("arguments[0].click();", element)
+                        time.sleep(1)
+                        return True
+                    except Exception as e:
+                        logging.error(f"JavaScript点击失败: {str(e)}")
+                        return False
+            except Exception as e:
+                logging.error(f"直接点击失败: {str(e)}")
+                return False
+        except Exception as e:
+            logging.error(f"安全点击异常: {str(e)}")
+            return False
+
+    def is_next_page_loaded(self, driver):
+        """
+        验证新页面是否成功加载
+        返回True表示翻页成功
+        """
+        import time
+        from selenium.webdriver.common.by import By
+
+        try:
+            # 检查1：URL是否变化
+            if driver.current_url != self.previous_url:
+                logging.info("URL变化，翻页成功")
+                self.previous_url = driver.current_url
+                return True
+
+            # 检查2：是否出现新页面的特征元素
+            next_page_indicators = [
+                ".div_question",  # 问题元素
+                ".field",  # 字段容器
+                ".question",  # 问题容器
+                "#divNext",  # 下一页按钮
+                "#divSubmit",  # 提交按钮
+                "div.ui-page",  # 分页指示器
+                "li.active"  # 活动分页
+            ]
+
+            for indicator in next_page_indicators:
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, indicator)
+                    if elements and elements[0].is_displayed():
+                        logging.info(f"检测到特征元素: {indicator}")
+                        return True
+                except Exception:
+                    continue
+
+            # 检查3：是否出现特定的文本内容
+            page_texts = [
+                "第2页", "第3页", "第4页", "第5页", "下一页",
+                "Page 2", "Page 3", "Page 4", "Page 5", "Next"
+            ]
+
+            page_source = driver.page_source.lower()
+            for text in page_texts:
+                if text.lower() in page_source:
+                    logging.info(f"检测到页面文本: {text}")
+                    return True
+
+            # 检查4：等待新元素出现
+            try:
+                WebDriverWait(driver, 3).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".div_question"))
+                )
+                return True
+            except TimeoutException:
+                pass
+
+            logging.warning("未检测到翻页成功迹象")
+            return False
+        except Exception as e:
+            logging.error(f"翻页验证失败: {str(e)}")
+            return False
 
     def set_question_bias(self, q_type, direction, q_num, entries):
         """为单个题目设置偏左或偏右分布"""
@@ -2348,6 +2657,29 @@ class WJXAutoFillApp:
         except Exception as e:
             logging.debug(f"更新控件字体时出错: {str(e)}")
 
+    def on_ai_service_change(self, event=None):
+        """动态显示/隐藏API Key输入框"""
+        service = self.ai_service.get()
+        if service == "OpenAI":
+            # 显示OpenAI相关控件
+            self.openai_api_key_label.grid()
+            self.openai_api_key_entry.grid()
+            # 隐藏质谱清言相关控件
+            self.qingyan_api_key_label.grid_remove()
+            self.qingyan_api_key_entry.grid_remove()
+            self.api_link.grid_remove()
+            # 修改提示文本
+            self.refresh_prompt_btn.config(text="重新生成Prompt(OpenAI)")
+        else:
+            # 显示质谱清言相关控件
+            self.qingyan_api_key_label.grid()
+            self.qingyan_api_key_entry.grid()
+            self.api_link.grid()
+            # 隐藏OpenAI相关控件
+            self.openai_api_key_label.grid_remove()
+            self.openai_api_key_entry.grid_remove()
+            # 恢复按钮文本
+            self.refresh_prompt_btn.config(text="重新生成Prompt(质谱清言)")
     def reload_question_settings(self):
         """重新加载题型设置界面 - 彻底销毁重建所有控件"""
         # 销毁所有子控件（包括Canvas/Scrollbar/Frame/Notebook）
@@ -2438,7 +2770,7 @@ class WJXAutoFillApp:
         import random
         import time
         from selenium import webdriver
-
+        import logging
         driver = None
         submit_count = 0
         proxy_ip = None
@@ -2513,8 +2845,6 @@ class WJXAutoFillApp:
                         else:
                             driver.set_window_size(1024, 768)
 
-
-
                     driver.get(self.config["url"])
                     time.sleep(self.config["page_load_delay"])
 
@@ -2542,29 +2872,42 @@ class WJXAutoFillApp:
 
                 submit_count += 1
 
-                # 智能提交间隔/批量休息机制（按原逻辑）
+                # ================ 智能提交间隔逻辑 ================
                 if self.config.get("enable_smart_gap", True):
-                    if self.running and self.cur_num < self.config["target_num"]:
-                        batch_size = self.config.get("batch_size", 0)
-                        batch_pause = self.config.get("batch_pause", 0)
-                        if batch_size > 0 and self.cur_num % batch_size == 0:
-                            logging.info(f"已完成{self.cur_num}份，批量休息{batch_pause}分钟...")
-                            for i in range(int(batch_pause * 60)):
-                                if not self.running:
-                                    break
-                                time.sleep(1)
-                        else:
-                            min_gap = self.config.get("min_submit_gap", 10)
-                            max_gap = self.config.get("max_submit_gap", 20)
-                            if min_gap > max_gap:
-                                min_gap, max_gap = max_gap, min_gap
-                            submit_interval = random.uniform(min_gap, max_gap) * 60
-                            logging.info(f"本次提交后等待{submit_interval / 60:.2f}分钟...")
-                            for i in range(int(submit_interval)):
-                                if not self.running:
-                                    break
-                                time.sleep(1)
-                # 若不开启，直接跳过间隔与批量休息
+                    # 检查是否达到批量提交数
+                    batch_size = self.config.get("batch_size", 5)
+                    if batch_size > 0 and submit_count % batch_size == 0:
+                        # 计算批量休息时间（分钟转秒）
+                        batch_pause_minutes = self.config.get("batch_pause", 15)
+                        batch_pause_seconds = batch_pause_minutes * 60
+
+                        logging.info(f"已完成{submit_count}份问卷，批量休息{batch_pause_minutes}分钟...")
+
+                        # 实现批量暂停
+                        for i in range(batch_pause_seconds):
+                            if not self.running:
+                                break
+                            time.sleep(1)
+                    else:
+                        # 计算随机提交间隔（分钟转秒）
+                        min_gap = self.config.get("min_submit_gap", 10)
+                        max_gap = self.config.get("max_submit_gap", 20)
+
+                        # 确保时间范围有效
+                        if min_gap > max_gap:
+                            min_gap, max_gap = max_gap, min_gap
+
+                        # 生成随机间隔时间（分钟）
+                        submit_interval_minutes = random.uniform(min_gap, max_gap)
+                        submit_interval_seconds = submit_interval_minutes * 60
+
+                        logging.info(f"本次提交后等待{submit_interval_minutes:.2f}分钟...")
+
+                        # 实现间隔等待
+                        for i in range(int(submit_interval_seconds)):
+                            if not self.running:
+                                break
+                            time.sleep(1)
 
         except Exception as e:
             logging.error(f"运行任务时出错: {str(e)}")
@@ -2576,17 +2919,17 @@ class WJXAutoFillApp:
                     pass
 
     def fill_survey(self, driver):
-        """
-        填写问卷内容，支持自动翻页和封面语，极力保证不漏写题目。
-        排序题补填阶段跳过，确保只点一轮。
-        显示为“2/5”格式的题目进度。
-        【修正版】避免填空题反复填写。
-        """
+        """填写问卷的主要逻辑"""
         import time
         import random
+        import logging  # 在函数开头导入logging模块
         from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        from selenium.common.exceptions import TimeoutException
 
         def is_filled(q):
+            """检查问题是否已填写"""
             # 检查排序题
             if q.find_elements(By.CSS_SELECTOR, ".sort-ul, .sortable, .wjx-sortable, .ui-sortable, .sort-container"):
                 return True
@@ -2618,6 +2961,7 @@ class WJXAutoFillApp:
             return False
 
         def update_progress(current, total):
+            """更新题目进度显示"""
             try:
                 progress = int((current / total) * 100) if total > 0 else 0
                 progress_text = f"题目进度{current}/{total}"
@@ -2626,46 +2970,67 @@ class WJXAutoFillApp:
                 if hasattr(self, "root"):
                     self.root.update_idletasks()
             except Exception as e:
-                import logging
                 logging.error(f"更新进度出错: {str(e)}")
 
         try:
-            for try_page in range(10):
+            # ================== 多页问卷处理 ==================
+            current_page = 0
+            max_pages = 10  # 最大页数限制
+
+            while current_page < max_pages and self.running:
+                current_page += 1
+                logging.info(f"正在处理第 {current_page} 页问卷")
+
+                # 等待题目加载
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, ".div_question, .field, .question"))
+                    )
+                except TimeoutException:
+                    logging.warning("页面加载超时，尝试刷新")
+                    driver.refresh()
+                    time.sleep(3)
+                    continue
+
+                # 获取当前页题目
                 questions = driver.find_elements(
                     By.CSS_SELECTOR,
                     ".field.ui-field-contain, .div_question, .question, .survey-question"
                 )
+
+                # 如果没有题目，尝试点击下一页/开始按钮
                 if not questions:
                     if self.auto_click_next_page(driver):
-                        import logging
-                        logging.info("检测到封面语或分页，已自动点击下一页/继续/开始答题")
                         time.sleep(2)
                         continue
                     else:
-                        import logging
-                        logging.warning("未检测到题目，也未发现可点击的下一页/继续按钮，跳过本页")
-                        return False
+                        logging.warning("未检测到题目，也未发现可点击的下一页/继续按钮")
+                        break
 
                 total_questions = len(questions)
                 if total_questions == 0:
                     continue
 
+                # 计算本页答题时间
                 total_time = random.randint(self.config["min_duration"], self.config["max_duration"])
                 start_time = time.time()
                 avg_time_per_question = total_time / total_questions
                 remaining_time = total_time
-
                 already_filled = set()
 
+                # 填写本页所有题目
                 for i, q in enumerate(questions):
                     if not self.running:
                         break
-                    q_id = q.get_attribute("id") or f"q_{i}"
+
+                    q_id = q.get_attribute("id") or f"q_{i}_{current_page}"
                     if q_id in already_filled:
                         continue
+
                     current_question = i + 1
                     update_progress(current_question, total_questions)
 
+                    # 计算每题时间
                     if i == total_questions - 1:
                         question_time = remaining_time
                     else:
@@ -2673,6 +3038,7 @@ class WJXAutoFillApp:
                             random.uniform(avg_time_per_question * 0.5, avg_time_per_question * 1.5),
                             remaining_time - (total_questions - i - 1)
                         )
+
                     question_start = time.time()
 
                     try:
@@ -2712,11 +3078,10 @@ class WJXAutoFillApp:
                         remaining_time -= time.time() - question_start
 
                     except Exception as e:
-                        import logging
                         logging.error(f"填写第{q_num}题时出错: {str(e)}")
                         continue
 
-                # 补填环节，确保只补未填的且只补一次
+                # 补填本页未填题目
                 questions2 = driver.find_elements(
                     By.CSS_SELECTOR,
                     ".field.ui-field-contain, .div_question, .question, .survey-question"
@@ -2725,6 +3090,7 @@ class WJXAutoFillApp:
                     q_id = q.get_attribute("id") or ""
                     if q_id in already_filled:
                         continue
+
                     is_required = False
                     try:
                         if q.find_element(By.CSS_SELECTOR, ".required, .star, .necessary, .wjxnecessary"):
@@ -2733,11 +3099,9 @@ class WJXAutoFillApp:
                         if "必答" in q.text or q.get_attribute("data-required") == "1":
                             is_required = True
 
-                    q_type = q.get_attribute("type")
-                    if q_type == "11":
-                        continue
                     if not is_required and is_filled(q):
                         continue
+
                     if not is_filled(q):
                         q_num = q_id.replace("div", "") if q_id else ""
                         try:
@@ -2745,21 +3109,31 @@ class WJXAutoFillApp:
                             if is_filled(q):
                                 already_filled.add(q_id)
                         except Exception as e:
-                            import logging
                             logging.warning(f"补填题目{q_num}时出错: {e}")
 
+                # 确保本页答题时间
                 elapsed_total = time.time() - start_time
                 if elapsed_total < total_time:
                     time.sleep(total_time - elapsed_total)
 
-                return self.submit_survey(driver)
+                # 尝试翻页
+                if self.auto_click_next_page(driver):
+                    # 验证翻页是否成功
+                    if self.is_next_page_loaded(driver):
+                        logging.info(f"成功翻到第 {current_page + 1} 页")
+                        time.sleep(self.config["page_load_delay"])
+                        continue
+                    else:
+                        logging.warning("翻页后未检测到新页面")
 
-            import logging
-            logging.warning("连续多页未检测到题目，可能页面结构异常。")
-            return False
+                # 翻页失败后的处理
+                logging.info("没有下一页，准备提交问卷")
+                break
+
+            # 提交问卷
+            return self.submit_survey(driver)
 
         except Exception as e:
-            import logging
             logging.error(f"填写问卷过程中出错: {str(e)}")
             return False
 
@@ -2879,12 +3253,19 @@ class WJXAutoFillApp:
 
         if ai_enabled and api_key and question_text:
             try:
-                ai_answer = self.zhipu_generate_answer(question_text, api_key, prompt_template)
+                service = self.config.get("ai_service", "质谱清言")
+                if service == "OpenAI":
+                    # 使用OpenAI接口
+                    ai_answer = self.ai_generate_answer(question_text, api_key, prompt_template)
+                else:
+                    # 使用质谱清言接口
+                    ai_answer = self.zhipu_generate_answer(question_text, api_key, prompt_template)
                 answers = [ai_answer] * len(all_fields)
-                logging.debug(f"AI生成答案用于题目 {q_num}")
+                logging.info(f"使用{service}生成答案: {ai_answer[:20]}...")
             except Exception as e:
                 logging.warning(f"AI答题失败: {str(e)}")
-                answers = ["自动填写内容"] * len(all_fields)
+                answers = [self.get_identity_answer("", question_text)] * len(all_fields)
+
         elif q_key in self.config.get("multiple_texts", {}):
             ans_lists = self.config["multiple_texts"][q_key]
             for i in range(len(all_fields)):
@@ -4290,6 +4671,13 @@ class WJXAutoFillApp:
             self.batch_size.set(self.config.get("batch_size", 5))
             self.batch_pause.set(self.config.get("batch_pause", 15))
             # 重新加载题型设置
+            self.ai_service.set(DEFAULT_CONFIG["ai_service"])
+            self.ai_fill_var.set(DEFAULT_CONFIG["ai_fill_enabled"])
+            self.openai_api_key_entry.delete(0, tk.END)
+            self.openai_api_key_entry.insert(0, DEFAULT_CONFIG.get("openai_api_key", ""))
+            self.qingyan_api_key_entry.delete(0, tk.END)
+            self.qingyan_api_key_entry.insert(0, DEFAULT_CONFIG.get("qingyan_api_key", ""))
+            self.ai_prompt_combobox.set(DEFAULT_CONFIG["ai_prompt_template"])
             self.reload_question_settings()
             logging.info("已重置为默认配置")
 
@@ -4341,9 +4729,11 @@ class WJXAutoFillApp:
             self.config["max_submit_gap"] = int(self.max_submit_gap.get())
             self.config["batch_size"] = int(self.batch_size.get())
             self.config["batch_pause"] = int(self.batch_pause.get())
+            self.config["ai_service"] = self.ai_service.get()
             self.config["ai_fill_enabled"] = self.ai_fill_var.get()
-            self.config["openai_api_key"] = self.qingyan_api_key_entry.get().strip()
-            self.config["ai_prompt_template"] = self.ai_prompt_var.get().strip()
+            self.config["openai_api_key"] = self.openai_api_key_entry.get().strip()
+            self.config["qingyan_api_key"] = self.qingyan_api_key_entry.get().strip()
+            self.config["ai_prompt_template"] = self.ai_prompt_combobox.get()
             # ====== 2. 题型配置 ======
             # 单选题配置
             for i, entry_row in enumerate(self.single_entries):
