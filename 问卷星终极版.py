@@ -335,6 +335,9 @@ class WJXAutoFillApp:
         # 添加手动修正按钮到控制面板
         self.correct_btn = ttk.Button(btn_frame, text="修正题型", command=self.correct_question_types, width=10)
         self.correct_btn.pack(side=tk.LEFT, padx=5)
+        self.ai_struct_btn = ttk.Button(btn_frame, text="AI一键生成题型配置", command=self.ai_generate_structure,
+                                        width=16)
+        self.ai_struct_btn.pack(side=tk.LEFT, padx=5)
 
         ttk.Separator(btn_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y)
         ttk.Separator(btn_frame, orient=tk.VERTICAL).pack(side=tk.LEFT, padx=10, fill=tk.Y)
@@ -426,6 +429,7 @@ class WJXAutoFillApp:
         self.log_area = scrolledtext.ScrolledText(self.log_frame, height=10)
         self.log_area.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.log_area.config(state=tk.DISABLED)
+
 
     def setup_logging(self):
         """配置日志系统"""
@@ -5023,7 +5027,73 @@ class WJXAutoFillApp:
         time.sleep(delay)
 
 
+    def ai_generate_structure(self):
+        """AI一键生成题型配置，并自动刷新题型设置界面"""
+        from ai_questionnaire_parser import ai_parse_questionnaire
+        import tkinter.messagebox as messagebox
 
+        api_key = self.qingyan_api_key_entry.get().strip()
+        if not api_key:
+            messagebox.showerror("错误", "请先填写质谱清言API Key")
+            return
+
+        # 采集当前题目
+        questions = []
+        for qid, qtext in self.config.get("question_texts", {}).items():
+            opts = self.config["option_texts"].get(qid, [])
+            questions.append({"text": qtext, "options": opts})
+
+        # 状态提示
+        self.status_var.set("AI结构识别中...")
+        self.status_indicator.config(foreground="orange")
+        self.root.update()
+
+        try:
+            ai_result = ai_parse_questionnaire(questions, api_key)
+            if not isinstance(ai_result, dict) or "questions" not in ai_result:
+                messagebox.showerror("AI解析失败", f"AI返回内容无法解析结构。\n{ai_result}")
+                self.status_var.set("AI结构识别失败")
+                self.status_indicator.config(foreground="red")
+                return
+
+            # 清空原配置并重建
+            for key in ["single_prob", "multiple_prob", "matrix_prob", "texts", "multiple_texts", "reorder_prob", "droplist_prob", "scale_prob"]:
+                self.config[key] = {}
+
+            for q in ai_result["questions"]:
+                qid = str(q["id"])
+                typ = q["type"]
+                opts = q.get("options", [])
+                self.config["question_texts"][qid] = q["text"]
+                self.config["option_texts"][qid] = opts
+                if typ == "单选":
+                    self.config["single_prob"][qid] = -1
+                elif typ == "多选":
+                    self.config["multiple_prob"][qid] = {"prob": [50]*len(opts), "min_selection": 1, "max_selection": max(2, len(opts))}
+                elif typ == "量表":
+                    self.config["scale_prob"][qid] = [0.2]*len(opts)
+                elif typ == "矩阵":
+                    self.config["matrix_prob"][qid] = -1
+                elif typ == "排序":
+                    self.config["reorder_prob"][qid] = [0.25]*len(opts)
+                elif typ == "填空":
+                    self.config["texts"][qid] = ["示例答案"]
+                elif typ == "多项填空":
+                    self.config["multiple_texts"][qid] = [["示例答案"]*len(opts)]
+                elif typ == "下拉":
+                    self.config["droplist_prob"][qid] = [0.3]*len(opts)
+
+            messagebox.showinfo("成功", "AI已自动生成题型配置，已刷新题型设置界面。")
+            self.status_var.set("AI结构识别完成")
+            self.status_indicator.config(foreground="green")
+            self.reload_question_settings()
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("AI解析失败", f"{e}")
+            self.status_var.set("AI结构识别失败")
+            self.status_indicator.config(foreground="red")
 
 if __name__ == "__main__":
     root = ThemedTk(theme="arc")
