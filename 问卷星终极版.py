@@ -2908,7 +2908,7 @@ class WJXAutoFillApp:
     def fill_survey(self, driver):
         """
         改进版：填写问卷，题目进度条按“实际可见题数”显示，避免统计错误，防死循环/多处理第一页。
-        修正版：用页面内容判重，支持多页URL不变场景。
+        修正版：无题目时尝试提交按钮！
         """
         import random
         import time
@@ -2920,8 +2920,35 @@ class WJXAutoFillApp:
 
         current_page = 1
         max_pages = 20  # 设置一个合理的最大页数限制
-
         processed_signatures = set()  # 用于判重，多页URL不变时内容不同也能识别
+
+        def try_submit_on_no_question(driver):
+            """
+            当页面无题目时，尝试查找并点击提交按钮（兼容不同模板）
+            """
+            submit_selectors = [
+                "#submit_button", "#ctlNext", "input[value*='提交']", "a.submitbutton", "#btnSubmit",
+                ".submit-btn", ".submitbutton", ".btn-submit", ".btn-success",
+                "button[type='submit']", "input[type='submit']",
+                "div.submit", ".survey-submit", "button", "a"
+            ]
+            for sel in submit_selectors:
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, sel)
+                    for elem in elements:
+                        if elem.is_displayed():
+                            text = elem.text or elem.get_attribute("value") or ""
+                            # 只要有“提交”、“完成”、“交卷”等字样就判定为提交按钮
+                            if any(word in text for word in ["提交", "完成", "交卷", "确定", "submit"]):
+                                try:
+                                    elem.click()
+                                    time.sleep(1)
+                                    return True
+                                except Exception:
+                                    continue
+                except Exception:
+                    continue
+            return False
 
         while current_page <= max_pages and self.running:
             logging.info(f"正在处理第 {current_page} 页问卷")
@@ -2950,22 +2977,25 @@ class WJXAutoFillApp:
             ]
             total_questions = len(questions)
 
-            # ==== 修改点：用页面内容hash判重 ====
-            cur_page_signature = "|".join([q.text.strip()[:30] for q in questions])
+            # ==== 用页面内容hash判重 ====
+            cur_page_signature = "|".join([q.text.strip()[:30] for q in questions]) if questions else driver.current_url
             if cur_page_signature in processed_signatures:
                 logging.warning("检测到重复页面，跳出循环避免死循环")
                 break
             processed_signatures.add(cur_page_signature)
-            # ==== 结束 ====
+            # ==== END ====
 
-            # 如果没有题目，尝试点击下一页或直接退出
+            # 如果没有题目，优先尝试提交
             if total_questions == 0:
-                logging.info("本页无可见题目，尝试翻页")
+                logging.info("本页无可见题目，尝试提交或翻页")
+                if try_submit_on_no_question(driver):
+                    logging.info("无题目页已成功提交")
+                    return True
                 if self.auto_click_next_page(driver):
                     current_page += 1
                     continue
                 else:
-                    logging.warning("未检测到可见题目，也未发现可点击的下一页/继续按钮")
+                    logging.warning("未检测到可见题目，也未发现可点击的下一页/继续按钮或提交按钮")
                     break
 
             # 计算本页答题时间
@@ -3097,8 +3127,11 @@ class WJXAutoFillApp:
             # 如果没有下一页按钮，检查是否真的到最后一页
             submit_button = driver.find_elements(By.CSS_SELECTOR,
                                                  "#submit_button, #ctlNext, input[value*='提交'], a.submitbutton, #btnSubmit")
-
             if not submit_button:
+                # 再次尝试无题目提交
+                if try_submit_on_no_question(driver):
+                    logging.info("最后一页无题目已成功提交")
+                    return True
                 logging.warning("未找到提交按钮，可能不是最后一页，尝试刷新")
                 driver.refresh()
                 time.sleep(2)
