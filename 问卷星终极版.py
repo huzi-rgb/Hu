@@ -413,6 +413,7 @@ class WJXAutoFillApp:
         # 初始化字体
         self.update_font()
 
+        self.root.after(200, lambda: self.main_paned.sashpos(0, 600))
     def create_log_area(self):
         """创建日志区域"""
         # 日志控制按钮
@@ -5028,22 +5029,21 @@ class WJXAutoFillApp:
 
 
     def ai_generate_structure(self):
-        """AI一键生成题型配置，并自动刷新题型设置界面"""
         from ai_questionnaire_parser import ai_parse_questionnaire
         import tkinter.messagebox as messagebox
+        import json
+        import logging
 
         api_key = self.qingyan_api_key_entry.get().strip()
         if not api_key:
             messagebox.showerror("错误", "请先填写质谱清言API Key")
             return
 
-        # 采集当前题目
         questions = []
         for qid, qtext in self.config.get("question_texts", {}).items():
             opts = self.config["option_texts"].get(qid, [])
             questions.append({"text": qtext, "options": opts})
 
-        # 状态提示
         self.status_var.set("AI结构识别中...")
         self.status_indicator.config(foreground="orange")
         self.root.update()
@@ -5056,7 +5056,28 @@ class WJXAutoFillApp:
                 self.status_indicator.config(foreground="red")
                 return
 
-            # 清空原配置并重建
+            # ======= 仅输出题型分布到日志栏 =======
+            type_count = {}
+            type_names = {
+                "单选": "单选题",
+                "多选": "多选题",
+                "量表": "量表题",
+                "矩阵": "矩阵题",
+                "排序": "排序题",
+                "填空": "填空题",
+                "多项填空": "多项填空",
+                "下拉": "下拉框"
+            }
+            for q in ai_result["questions"]:
+                typ = q.get("type", "")
+                zh_name = type_names.get(typ, typ)
+                type_count[zh_name] = type_count.get(zh_name, 0) + 1
+
+            stats = ", ".join(f"{k}: {v}" for k, v in type_count.items())
+            logging.info(f"AI题型统计: {stats}")
+            # ======= END =======
+
+            # 清空旧配置，按AI结果刷新
             for key in ["single_prob", "multiple_prob", "matrix_prob", "texts", "multiple_texts", "reorder_prob", "droplist_prob", "scale_prob"]:
                 self.config[key] = {}
 
@@ -5094,7 +5115,6 @@ class WJXAutoFillApp:
             messagebox.showerror("AI解析失败", f"{e}")
             self.status_var.set("AI结构识别失败")
             self.status_indicator.config(foreground="red")
-
 if __name__ == "__main__":
     root = ThemedTk(theme="arc")
     root.geometry("1280x900")  # 增大初始窗口尺寸，宽度≥1200
