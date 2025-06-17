@@ -2321,7 +2321,8 @@ class WJXAutoFillApp:
             ".btn-start", ".start-btn", "#ctlNext", "#submit_button",
             ".submit-btn", ".submitbutton", ".btn-submit", ".btn-success",
             "#next_button", ".next-button", "#submit_btn", "button[type='submit']",
-            "input[type='submit']", "a.next", "div.next", "span.next"
+            "input[type='submit']", "a.next", "div.next", "span.next",
+            ".button.mainBgColor"  # 增加对问卷星新版“下一页”按钮的支持
         ]
 
         # 方法1：通过按钮文本查找
@@ -2766,6 +2767,7 @@ class WJXAutoFillApp:
     def run_filling(self, x=0, y=0):
         """
         运行填写任务 - 可用微信作答比率滑动条控制微信来源填写比例
+        增强：自动处理invalid session id异常，driver失效自动重启。
         """
         import random
         import time
@@ -2775,7 +2777,6 @@ class WJXAutoFillApp:
         submit_count = 0
         proxy_ip = None
 
-        # 微信和PC UA
         WECHAT_UA = (
             "Mozilla/5.0 (Linux; Android 10; MI 8 Build/QKQ1.190828.002; wv) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/86.0.4240.99 "
@@ -2788,17 +2789,24 @@ class WJXAutoFillApp:
             "Chrome/91.0.4472.124 Safari/537.36"
         )
 
+        def create_driver(options):
+            try:
+                return webdriver.Chrome(options=options)
+            except Exception as e:
+                logging.error(f"创建浏览器驱动失败: {e}")
+                time.sleep(10)
+                return None
+
         try:
             while self.running and self.cur_num < self.config["target_num"]:
                 if self.paused:
                     time.sleep(1)
                     continue
 
-                # 1. 用滑动条控制微信来源比例
-                # self.config["weixin_ratio"]已实时跟随滑动条
+                # 微信来源比例
                 use_weixin = random.random() < float(self.config.get("weixin_ratio", 0.5))
 
-                # 2. 配置chromedriver选项
+                # chromedriver选项
                 options = webdriver.ChromeOptions()
                 options.add_experimental_option("excludeSwitches", ["enable-automation"])
                 options.add_experimental_option("useAutomationExtension", False)
@@ -2813,7 +2821,7 @@ class WJXAutoFillApp:
                 else:
                     options.add_argument(f'--window-position={x},{y}')
 
-                # 3. 代理设置
+                # 代理设置
                 use_ip = self.config.get("use_ip", False)
                 ip_mode = self.config.get("ip_change_mode", "per_submit")
                 ip_batch = self.config.get("ip_change_batch", 5)
@@ -2836,9 +2844,12 @@ class WJXAutoFillApp:
                 elif use_ip and proxy_ip:
                     options.add_argument(f'--proxy-server={proxy_ip}')
 
-                driver = webdriver.Chrome(options=options)
+                driver = create_driver(options)
+                if not driver:
+                    continue
+
                 try:
-                    # 4. 设置窗口为手机尺寸以模拟微信端访问
+                    # 设置窗口
                     if not self.config["headless"]:
                         if use_weixin:
                             driver.set_window_size(375, 812)
@@ -2848,15 +2859,41 @@ class WJXAutoFillApp:
                     driver.get(self.config["url"])
                     time.sleep(self.config["page_load_delay"])
 
-                    # 填写问卷
-                    if self.fill_survey(driver):
-                        with self.lock:
-                            self.cur_num += 1
-                        logging.info(f"第 {self.cur_num} 份问卷提交成功")
-                    else:
-                        with self.lock:
-                            self.cur_fail += 1
-                        logging.warning(f"第 {self.cur_num + 1} 份问卷提交失败")
+                    # 填写问卷并自动处理invalid session id异常
+                    max_retry = 2
+                    for attempt in range(max_retry):
+                        try:
+                            success = self.fill_survey(driver)
+                            if success:
+                                with self.lock:
+                                    self.cur_num += 1
+                                logging.info(f"第 {self.cur_num} 份问卷提交成功")
+                            else:
+                                with self.lock:
+                                    self.cur_fail += 1
+                                logging.warning(f"第 {self.cur_num + 1} 份问卷提交失败")
+                            break
+                        except Exception as e:
+                            err_msg = str(e)
+                            if "invalid session id" in err_msg.lower() or "invalid session" in err_msg.lower():
+                                logging.error("检测到invalid session id，重建driver后重试")
+                                try:
+                                    driver.quit()
+                                except:
+                                    pass
+                                driver = create_driver(options)
+                                if not driver:
+                                    break
+                                driver.get(self.config["url"])
+                                time.sleep(self.config["page_load_delay"])
+                                continue
+                            else:
+                                with self.lock:
+                                    self.cur_fail += 1
+                                logging.error(f"填写问卷时出错: {err_msg}")
+                                import traceback
+                                traceback.print_exc()
+                                break
 
                 except Exception as e:
                     with self.lock:
@@ -2872,38 +2909,25 @@ class WJXAutoFillApp:
 
                 submit_count += 1
 
-                # ================ 智能提交间隔逻辑 ================
+                # 智能提交间隔逻辑
                 if self.config.get("enable_smart_gap", True):
-                    # 检查是否达到批量提交数
                     batch_size = self.config.get("batch_size", 5)
                     if batch_size > 0 and submit_count % batch_size == 0:
-                        # 计算批量休息时间（分钟转秒）
                         batch_pause_minutes = self.config.get("batch_pause", 15)
                         batch_pause_seconds = batch_pause_minutes * 60
-
                         logging.info(f"已完成{submit_count}份问卷，批量休息{batch_pause_minutes}分钟...")
-
-                        # 实现批量暂停
                         for i in range(batch_pause_seconds):
                             if not self.running:
                                 break
                             time.sleep(1)
                     else:
-                        # 计算随机提交间隔（分钟转秒）
                         min_gap = self.config.get("min_submit_gap", 10)
                         max_gap = self.config.get("max_submit_gap", 20)
-
-                        # 确保时间范围有效
                         if min_gap > max_gap:
                             min_gap, max_gap = max_gap, min_gap
-
-                        # 生成随机间隔时间（分钟）
                         submit_interval_minutes = random.uniform(min_gap, max_gap)
                         submit_interval_seconds = submit_interval_minutes * 60
-
                         logging.info(f"本次提交后等待{submit_interval_minutes:.2f}分钟...")
-
-                        # 实现间隔等待
                         for i in range(int(submit_interval_seconds)):
                             if not self.running:
                                 break
