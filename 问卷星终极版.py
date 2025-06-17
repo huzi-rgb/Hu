@@ -269,7 +269,7 @@ class WJXAutoFillApp:
         self.pause_event = threading.Event()
         self.tooltips = []
         self.parsing = False
-
+        self.previous_url = None  # <--- 加在__init__里
         self.dynamic_prompt_list = None  # 新增：用于存放最新AI生成的Prompt列表
         # 初始化字体
         self.font_family = tk.StringVar()
@@ -1842,6 +1842,7 @@ class WJXAutoFillApp:
                 except:
                     pass
             self.parsing = False
+
             self.root.after(0, lambda: self.parse_btn.config(state=tk.NORMAL, text="解析问卷"))
             self.root.after(0, lambda: self.status_var.set("就绪"))
             self.root.after(0, lambda: self.status_indicator.config(foreground="green"))
@@ -2364,19 +2365,27 @@ class WJXAutoFillApp:
         logging.error("未能自动翻页，下一页按钮未找到或点击失败")
         return False
 
-    def is_next_page_loaded(self, driver, original_url):
-        """更可靠的翻页验证方法 - 专门适配问卷星"""
+    def is_next_page_loaded(self, driver):
+        """
+        更可靠的翻页验证方法 - 专门适配问卷星
+        1. 检查URL是否变化（用self.previous_url）
+        2. 检查特征元素
+        3. 检查页面文本
+        4. 检查题目数量
+        """
         from selenium.webdriver.common.by import By
         import time
+        import logging
 
         # 1. 检查URL是否变化
-        if driver.current_url != original_url:
+        if hasattr(self, "previous_url") and driver.current_url != self.previous_url:
             logging.info("URL变化，翻页成功")
+            # 可选：同步更新previous_url，便于下一页继续判断
+            self.previous_url = driver.current_url
             return True
 
         # 2. 检查新页面特有元素
         try:
-            # 问卷星下一页常见元素
             next_page_indicators = [
                 "#divNext",  # 下一页按钮
                 "#divSubmit",  # 提交按钮
@@ -2385,31 +2394,29 @@ class WJXAutoFillApp:
                 ".wjx-page",  # 问卷星分页类
                 "div.ui-page"  # 分页指示器
             ]
-
             for indicator in next_page_indicators:
                 try:
                     elements = driver.find_elements(By.CSS_SELECTOR, indicator)
                     if elements and elements[0].is_displayed():
                         logging.info(f"检测到特征元素: {indicator}")
                         return True
-                except:
+                except Exception:
                     continue
-        except:
+        except Exception:
             pass
 
-        # 3. 检查特定文本内容
+        # 3. 检查特定页面文本
         try:
             page_texts = [
                 "第2页", "第3页", "第4页", "第5页", "下一页",
                 "Page 2", "Page 3", "Page 4", "Page 5", "Next"
             ]
-
             page_source = driver.page_source
             for text in page_texts:
                 if text in page_source:
                     logging.info(f"检测到页面文本: {text}")
                     return True
-        except:
+        except Exception:
             pass
 
         # 4. 检查题目数量变化
@@ -2419,11 +2426,12 @@ class WJXAutoFillApp:
             if questions and len(questions) > 0:
                 logging.info(f"检测到新页面题目数量: {len(questions)}")
                 return True
-        except:
+        except Exception:
             pass
 
         logging.warning("未检测到翻页成功迹象")
         return False
+
     def safe_click(self, driver, element):
         """
         安全点击元素，处理各种点击异常情况
@@ -2958,10 +2966,10 @@ class WJXAutoFillApp:
                     pass
 
     def fill_survey(self, driver):
-        """填写问卷的主要逻辑"""
+        """填写问卷的主要逻辑（已修正多页翻页判断和self.previous_url问题）"""
         import time
         import random
-        import logging  # 在函数开头导入logging模块
+        import logging
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
@@ -3154,6 +3162,9 @@ class WJXAutoFillApp:
                 elapsed_total = time.time() - start_time
                 if elapsed_total < total_time:
                     time.sleep(total_time - elapsed_total)
+
+                # ========== 修正：翻页前记录当前URL ==========
+                self.previous_url = driver.current_url
 
                 # 尝试翻页
                 if self.auto_click_next_page(driver):
