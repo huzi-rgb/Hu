@@ -5056,28 +5056,30 @@ class WJXAutoFillApp:
                 self.status_indicator.config(foreground="red")
                 return
 
-            # ======= 仅输出题型分布到日志栏 =======
-            type_count = {}
+            # ======= 统一题型统计输出（与本地一致顺序） =======
             type_names = {
+                "填空": "填空题",
+                "多项填空": "多项填空",
                 "单选": "单选题",
                 "多选": "多选题",
                 "量表": "量表题",
                 "矩阵": "矩阵题",
-                "排序": "排序题",
-                "填空": "填空题",
-                "多项填空": "多项填空",
-                "下拉": "下拉框"
+                "下拉": "下拉框",
+                "排序": "排序题"
             }
+            ordered_types = ["填空题", "多项填空", "单选题", "多选题", "量表题", "矩阵题", "下拉框", "排序题"]
+            type_count = {name: 0 for name in ordered_types}
             for q in ai_result["questions"]:
                 typ = q.get("type", "")
                 zh_name = type_names.get(typ, typ)
-                type_count[zh_name] = type_count.get(zh_name, 0) + 1
+                if zh_name in type_count:
+                    type_count[zh_name] += 1
 
-            stats = ", ".join(f"{k}: {v}" for k, v in type_count.items())
-            logging.info(f"AI题型统计: {stats}")
+            stats = "，".join(f"{k}：{v}" for k, v in type_count.items())
+            logging.info(f"AI题型统计：{stats}")
             # ======= END =======
 
-            # 清空旧配置，按AI结果刷新
+            # 清空旧配置，按AI结果刷新题型设置
             for key in ["single_prob", "multiple_prob", "matrix_prob", "texts", "multiple_texts", "reorder_prob", "droplist_prob", "scale_prob"]:
                 self.config[key] = {}
 
