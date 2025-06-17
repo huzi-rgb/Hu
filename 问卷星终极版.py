@@ -1576,7 +1576,7 @@ class WJXAutoFillApp:
 
     def _parse_survey_thread(self):
         """
-        解析问卷结构并生成配置模板 - 题型判别加强版
+        解析问卷结构并生成配置模板 - 题型判别加强版（增强量表题检测）
         """
         driver = None
         try:
@@ -1641,7 +1641,7 @@ class WJXAutoFillApp:
                     EC.presence_of_element_located((By.CSS_SELECTOR, ".div_question, .field, .question"))
                 )
 
-                # ----------- 修正版JS核心(优先判断多选/单选，填空最后) -----------
+                # ----------- 增强量表题检测的JS核心 -----------
                 questions_data = driver.execute_script("""
                     const getText = (element) => element ? element.textContent.trim() : '';
                     const questionSelectors = [
@@ -1684,25 +1684,39 @@ class WJXAutoFillApp:
                         if (isSortableElement || hasSortClass || hasSortText) {
                             type = '11';
                         }
-                        // 2. 多选题（checkbox）优先于填空
+                        // 2. 量表题 优先于单选/多选 (增强版)
+                        else if (
+                            q.querySelector('.scale-ul, .scale, .likert, .rating, .wjx-scale') ||
+                            (function(){
+                                let rows = q.querySelectorAll('tr');
+                                if(rows.length > 2) {
+                                    let radios_per_row = [];
+                                    rows.forEach(row => {
+                                        radios_per_row.push(row.querySelectorAll('input[type="radio"]').length);
+                                    });
+                                    let all_same = radios_per_row.every(v => v === radios_per_row[0]);
+                                    return all_same && radios_per_row[0] > 1;
+                                }
+                                return false;
+                            })()
+                        ) {
+                            type = '5';
+                        }
+                        // 3. 多选题（checkbox）
                         else if (q.querySelector('.ui-checkbox, input[type="checkbox"]')) {
                             type = '4';
                         }
-                        // 3. 单选题（radio）优先于填空
+                        // 4. 单选题（radio）
                         else if (q.querySelector('.ui-radio, input[type="radio"]')) {
                             type = '3';
                         }
-                        // 4. 矩阵题
+                        // 5. 矩阵题
                         else if (q.querySelector('.matrix, table.matrix')) {
                             type = '6';
                         }
-                        // 5. 下拉框 - 增强识别逻辑
+                        // 6. 下拉框
                         else if (q.querySelector('select, .custom-select, .dropdown, .select-box')) {
                             type = '7';
-                        }
-                        // 6. 量表题
-                        else if (q.querySelector('.scale-ul, .scale')) {
-                            type = '5';
                         }
                         // 7. 多项填空（多个空，且没有选择题结构）
                         else if (
@@ -1817,7 +1831,7 @@ class WJXAutoFillApp:
                     });
                     return result;
                 """)
-                # ----------- END 修正版JS核心 -----------
+                # ----------- END 增强量表题检测的JS核心 -----------
 
                 # 处理解析结果并自动生成Prompt
                 self._process_parsed_questions(questions_data)
@@ -1826,7 +1840,6 @@ class WJXAutoFillApp:
                 self.root.after(0, lambda: self.question_progress_var.set(100))
                 self.root.after(0, lambda: self.question_status_var.set("解析完成"))
                 self.root.after(0, lambda: messagebox.showinfo("成功", "问卷解析成功！"))
-
 
             except TimeoutException:
                 logging.error("问卷加载超时，请检查网络或链接。")
