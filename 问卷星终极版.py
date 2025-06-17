@@ -2296,117 +2296,118 @@ class WJXAutoFillApp:
             )
 
     def auto_click_next_page(self, driver):
-        """
-        增强版翻页按钮识别功能
-        支持多种翻页按钮类型：下一页、继续、开始答题等
-        """
-        import time
+        """增强版翻页功能 - 修复版"""
         from selenium.webdriver.common.by import By
-        from selenium.common.exceptions import ElementClickInterceptedException, NoSuchElementException
+        import time
+        import random
 
-        # 保存当前URL用于后续验证
-        if not hasattr(self, 'previous_url'):
-            self.previous_url = driver.current_url
-
-        # 定义所有可能的翻页按钮文本
-        BUTTON_TEXTS = [
-            "下一页", "继续", "开始答题", "进入问卷", "我已知晓",
-            "同意", "开始", "下一步", "提交", "确定", "完成",
-            "Next", "Continue", "Submit", "Start"
+        # 扩展选择器列表
+        next_selectors = [
+            "#divNext", "#ctlNext",  # 标准选择器
+            "//button[contains(text(),'下一页')]",
+            "//button[contains(text(),'下一题')]",
+            "//button[contains(text(),'继续')]",
+            "//button[contains(text(),'Next')]",
+            "//a[contains(text(),'下一页')]",
+            "//a[contains(text(),'下一题')]",
+            "//a[contains(text(),'继续')]",
+            "//a[contains(text(),'Next')]",
+            "//div[contains(@class,'next-button')]",
+            "//div[contains(@class,'submit')]",
+            "//input[contains(@value,'下一页')]",
+            "//input[contains(@value,'下一题')]",
+            "//input[contains(@value,'继续')]",
+            "//input[contains(@value,'Next')]"
         ]
 
-        # 定义所有可能的翻页按钮CSS选择器
-        BUTTON_SELECTORS = [
-            ".next-page", ".nextBtn", ".btn-next", ".btn-continue",
-            ".btn-start", ".start-btn", "#ctlNext", "#submit_button",
-            ".submit-btn", ".submitbutton", ".btn-submit", ".btn-success",
-            "#next_button", ".next-button", "#submit_btn", "button[type='submit']",
-            "input[type='submit']", "a.next", "div.next", "span.next",
-            ".button.mainBgColor"  # 增加对问卷星新版“下一页”按钮的支持
-        ]
-
-        # 方法1：通过按钮文本查找
-        for text in BUTTON_TEXTS:
+        for selector in next_selectors:
             try:
-                # 尝试按钮元素
-                buttons = driver.find_elements(By.XPATH, f"//button[contains(., '{text}')]")
-                for btn in buttons:
-                    if btn.is_displayed() and btn.is_enabled():
-                        if self.safe_click(driver, btn):
-                            logging.info(f"通过文本按钮点击: {text}")
-                            return True
+                if selector.startswith("//"):
+                    elements = driver.find_elements(By.XPATH, selector)
+                else:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
 
-                # 尝试链接元素
-                links = driver.find_elements(By.XPATH, f"//a[contains(., '{text}')]")
-                for link in links:
-                    if link.is_displayed() and link.is_enabled():
-                        if self.safe_click(driver, link):
-                            logging.info(f"通过文本链接点击: {text}")
-                            return True
+                for element in elements:
+                    if element.is_displayed() and element.is_enabled():
+                        # 滚动到元素并高亮显示
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});"
+                            "arguments[0].style.border='2px solid red';",
+                            element
+                        )
+                        time.sleep(0.5)
 
-                # 尝试输入按钮
-                inputs = driver.find_elements(By.XPATH, f"//input[@type='button' and contains(@value, '{text}')]")
-                for inp in inputs:
-                    if inp.is_displayed() and inp.is_enabled():
-                        if self.safe_click(driver, inp):
-                            logging.info(f"通过输入按钮点击: {text}")
-                            return True
+                        # 尝试多种点击方式
+                        try:
+                            element.click()
+                        except:
+                            driver.execute_script("arguments[0].click();", element)
 
-            except Exception as e:
-                logging.debug(f"文本查找失败: {text}, 错误: {str(e)}")
-                continue
+                        # 增加等待时间并验证
+                        time.sleep(self.config["submit_delay"] + random.uniform(0, 2))
 
-        # 方法2：通过CSS选择器查找
-        for selector in BUTTON_SELECTORS:
-            try:
-                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                for elem in elements:
-                    if elem.is_displayed() and elem.is_enabled():
-                        if self.safe_click(driver, elem):
-                            logging.info(f"通过CSS选择器点击: {selector}")
+                        # 验证是否翻页成功
+                        if self.is_next_page_loaded(driver):
                             return True
             except Exception as e:
-                logging.debug(f"选择器查找失败: {selector}, 错误: {str(e)}")
+                logging.debug(f"尝试选择器 {selector} 失败: {str(e)}")
                 continue
 
-        # 方法3：通过父容器查找
+        logging.warning("所有翻页选择器尝试失败")
+        return False
+
+    def is_next_page_loaded(self, driver):
+        """更可靠的翻页验证方法"""
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        import time
+
+        # 检查新页面特有元素
         try:
-            containers = driver.find_elements(By.CSS_SELECTOR, ".footer, .page-footer, .submit-area, .button-container")
-            for container in containers:
-                buttons = container.find_elements(By.TAG_NAME, "button")
-                for btn in buttons:
-                    if btn.is_displayed() and btn.is_enabled():
-                        if self.safe_click(driver, btn):
-                            logging.info("通过容器内按钮点击")
-                            return True
+            # 等待新页面题目元素出现
+            WebDriverWait(driver, 8).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, ".div_question, .field, .question"))
+            )
+            return True
+        except:
+            pass
 
-                inputs = container.find_elements(By.CSS_SELECTOR, "input[type='button'], input[type='submit']")
-                for inp in inputs:
-                    if inp.is_displayed() and inp.is_enabled():
-                        if self.safe_click(driver, inp):
-                            logging.info("通过容器内输入框点击")
-                            return True
-        except Exception as e:
-            logging.debug(f"容器查找失败: {str(e)}")
-
-        # 方法4：模糊匹配所有按钮
+        # 检查进度条变化
         try:
-            all_buttons = driver.find_elements(By.CSS_SELECTOR, "button, a, input[type='button'], input[type='submit']")
-            for btn in all_buttons:
-                try:
-                    text = btn.text.lower() or btn.get_attribute("value", "").lower() or ""
-                    if any(keyword in text for keyword in
-                           ["next", "continue", "submit", "start", "page", "下一步", "继续", "提交"]):
-                        if btn.is_displayed() and btn.is_enabled():
-                            if self.safe_click(driver, btn):
-                                logging.info(f"通过模糊匹配点击: {text[:20]}...")
-                                return True
-                except Exception:
-                    continue
-        except Exception as e:
-            logging.debug(f"模糊匹配失败: {str(e)}")
+            progress = driver.find_element(By.CSS_SELECTOR, ".progress-bar, .progress")
+            if "100%" not in progress.text:
+                return True
+        except:
+            pass
 
-        logging.warning("未找到有效的翻页按钮")
+        # 检查分页指示器
+        try:
+            page_indicators = driver.find_elements(By.CSS_SELECTOR, ".page-number, .pagination")
+            for indicator in page_indicators:
+                if "2" in indicator.text or "下一页" in indicator.text:
+                    return True
+        except:
+            pass
+
+        # 检查按钮文本变化
+        try:
+            buttons = driver.find_elements(By.CSS_SELECTOR, "button, a, input[type='button']")
+            for btn in buttons:
+                text = btn.text.strip()
+                if text in ["下一页", "下一题", "继续", "Next"]:
+                    return False  # 翻页按钮仍在说明翻页失败
+        except:
+            pass
+
+        # 最后手段：比较题目数量变化
+        try:
+            new_questions = driver.find_elements(By.CSS_SELECTOR, ".div_question, .field, .question")
+            if len(new_questions) > 0:
+                return True
+        except:
+            pass
+
         return False
 
     def safe_click(self, driver, element):
