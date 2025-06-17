@@ -6,6 +6,9 @@ import logging
 import random
 import webbrowser
 import re
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
 import traceback
 import time
 import numpy as np
@@ -2298,92 +2301,116 @@ class WJXAutoFillApp:
 
     def auto_click_next_page(self, driver):
         """
-        极速优化版翻页函数：多选择器定位，优先JS点击，动态短等待，极速判断是否翻页
-        点击后动态检测（最多3秒），200ms间隔，检测到新页面立即返回
+        增强版翻页函数：更全面的按钮定位，更可靠的翻页验证。
         """
-        import time
+        import logging
         from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
 
-        next_btn = None
-        selectors = [
-            "#divNext a",  # 标准
-            "a[id*='NextPage']",  # 备用1
-            "a[onclick*='next']",  # 备用2
-            # “:contains”选择器部分Selenium不支持，下面用文本兜底
-        ]
-        # 多选择器查找按钮
-        for selector in selectors:
-            try:
-                next_btn = WebDriverWait(driver, 2).until(
-                    EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
-                )
-                if next_btn.is_displayed():
-                    break
-            except Exception:
-                continue
+        def find_next_button():
+            """查找下一页按钮，多种定位策略"""
+            button_selectors = [
+                "#divNext a",  # 标准下一页
+                "#NextButton",  # 备选1
+                "a[onclick*='next']",  # 备选2
+                "input[value*='下一页']",  # 备选3
+                "button[onclick*='next']",  # 备选4
+                ".next-page",  # 备选5
+                "#btnNext",  # 备选6
+                ".button-next"  # 备选7
+            ]
 
-        # 文本兜底：找所有含“下一页”或“Next”文本按钮
-        if not next_btn:
+            # 通过选择器查找
+            for selector in button_selectors:
+                try:
+                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                    for element in elements:
+                        if element.is_displayed():
+                            return element
+                except Exception:
+                    continue
+
+            # 通过文本内容查找
             try:
-                btns = driver.find_elements(By.CSS_SELECTOR, "a, button")
-                for b in btns:
-                    if b.is_displayed() and ("下一页" in b.text or "Next" in b.text):
-                        next_btn = b
-                        break
+                elements = driver.find_elements(By.XPATH, "//*[contains(text(), '下一页') or contains(text(), 'Next')]")
+                for element in elements:
+                    if element.is_displayed():
+                        return element
             except Exception:
                 pass
 
-        if not next_btn:
-            return False
+            return None
 
-        # 优先JS点击
-        clicked = False
         try:
-            driver.execute_script("arguments[0].click();", next_btn)
-            clicked = True
-        except Exception:
-            try:
-                next_btn.click()
-                clicked = True
-            except Exception:
-                clicked = False
-        if not clicked:
-            return False
+            next_btn = find_next_button()
+            if not next_btn:
+                # 检查是否有"提交"按钮来确定是否真的是最后一页
+                submit_selectors = [
+                    "#submit_button",
+                    "#ctlNext",
+                    "input[value*='提交']",
+                    "a.submitbutton",
+                    "#btnSubmit"
+                ]
 
-        # 动态检测新页面（最多3秒，200ms间隔）
-        start_time = time.time()
+                has_submit = False
+                for selector in submit_selectors:
+                    try:
+                        submit_btn = driver.find_element(By.CSS_SELECTOR, selector)
+                        if submit_btn.is_displayed():
+                            has_submit = True
+                            break
+                    except Exception:
+                        continue
 
-        while time.time() - start_time < 3:  # 延长到5秒
-            try:
-                # 1. 检查URL变化
-                if driver.current_url != self.previous_url:
-                    logging.info("URL变化，翻页成功")
-                    return True
-
-                # 2. 检查特定元素（问卷星下一页按钮消失）
-                if not driver.find_elements(By.CSS_SELECTOR, "#divNext a, a[id*='NextPage']"):
-                    logging.info("下一页按钮消失，翻页成功")
-                    return True
-
-                # 3. 检查验证码元素
-                if driver.find_elements(By.CSS_SELECTOR, ".nc_iconfont, .geetest_panel"):
-                    logging.warning("检测到验证码，需要手动处理")
+                if has_submit:
+                    logging.info("已到达最后一页")
+                    return False
+                else:
+                    logging.warning("未找到下一页按钮也未找到提交按钮，可能页面加载问题")
                     return False
 
-                # 4. 检查题目加载
-                if driver.find_elements(By.CSS_SELECTOR, ".div_question:not([style*='display:none'])"):
-                    logging.info("检测到可见题目，翻页成功")
-                    return True
+            # 记录当前页面特征
+            current_url = driver.current_url
+            current_questions = len(driver.find_elements(By.CSS_SELECTOR, ".div_question, .field, .question"))
 
-            except Exception as e:
-                logging.error(f"翻页检测异常: {str(e)}")
+            # 点击下一页按钮
+            try:
+                driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", next_btn)
+                next_btn.click()
+            except Exception:
+                try:
+                    driver.execute_script("arguments[0].click();", next_btn)
+                except Exception as e:
+                    logging.error(f"点击下一页按钮失败: {e}")
+                    return False
 
-            time.sleep(0.3)
+            # 等待页面变化
+            for i in range(30):  # 最多等待3秒
+                try:
+                    # 检查URL变化
+                    if driver.current_url != current_url:
+                        return True
 
-        logging.warning("翻页检测超时，可能失败")
-        return False  # 超时返回失败
+                    # 检查题目数量变化
+                    new_questions = len(driver.find_elements(By.CSS_SELECTOR, ".div_question, .field, .question"))
+                    if new_questions != current_questions:
+                        return True
+
+                    # 检查新页面标识
+                    if driver.find_elements(By.CSS_SELECTOR, ".page-number, .page-index"):
+                        return True
+
+                except Exception:
+                    pass
+
+                time.sleep(0.1)
+
+            logging.warning("翻页后未检测到页面变化")
+            return False
+
+        except Exception as e:
+            logging.error(f"翻页操作异常: {e}")
+            return False
 
     def safe_click(self, driver, element):
         """
@@ -2891,218 +2918,166 @@ class WJXAutoFillApp:
 
     def fill_survey(self, driver):
         """
-        极速多页问卷自动填写主逻辑（翻页极致加速，去除所有翻页后的固定sleep，进入新页面即开始处理，无冗余等待）
+        改进翻页和提交逻辑的问卷填写函数
         """
-        import time
-        import random
-        import logging
-        from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        from selenium.common.exceptions import TimeoutException
+        current_page = 1
+        max_pages = 20  # 设置一个合理的最大页数限制
 
-        def is_filled(q):
-            """检查问题是否已填写"""
-            # 检查排序题
-            if q.find_elements(By.CSS_SELECTOR, ".sort-ul, .sortable, .wjx-sortable, .ui-sortable, .sort-container"):
-                return True
-            # 检查 input/textarea/select
-            inputs = q.find_elements(By.CSS_SELECTOR, "input, textarea, select")
-            for inp in inputs:
-                typ = inp.get_attribute("type")
-                if typ in ("checkbox", "radio"):
-                    if inp.is_selected():
-                        return True
-                elif typ in ("text", None):
-                    if inp.get_attribute("value"):
-                        return True
-                elif typ == "select-one":
-                    v = inp.get_attribute("value")
-                    if v and v != "" and v != "请选择":
-                        return True
-            # 检查 contenteditable span（填空题常有）
-            spans = q.find_elements(By.CSS_SELECTOR, "span[contenteditable='true']")
-            for span in spans:
-                if span.text.strip():
-                    return True
-                try:
-                    inner = driver.execute_script("return arguments[0].innerText;", span)
-                    if inner and inner.strip():
-                        return True
-                except Exception:
-                    continue
-            return False
+        while current_page <= max_pages and self.running:
+            logging.info(f"正在处理第 {current_page} 页问卷")
 
-        def update_progress(current, total):
-            """更新题目进度显示"""
+            # 等待题目加载
             try:
-                progress = int((current / total) * 100) if total > 0 else 0
-                progress_text = f"题目进度{current}/{total}"
-                self.question_progress_var.set(progress)
-                self.question_status_var.set(progress_text)
-                if hasattr(self, "root"):
-                    self.root.update_idletasks()
-            except Exception as e:
-                logging.error(f"更新进度出错: {str(e)}")
-
-        try:
-            current_page = 0
-            max_pages = 50  # 最大页数限制
-
-            while current_page < max_pages and self.running:
-                current_page += 1
-                logging.info(f"正在处理第 {current_page} 页问卷")
-
-                # 等待题目加载
-                try:
-                    WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.CSS_SELECTOR, ".div_question, .field, .question"))
-                    )
-                except TimeoutException:
-                    logging.warning("页面加载超时，尝试刷新")
-                    driver.refresh()
-                    time.sleep(1)
-                    continue
-
-                # 获取当前页题目
-                questions = driver.find_elements(
-                    By.CSS_SELECTOR,
-                    ".field.ui-field-contain, .div_question, .question, .survey-question"
+                WebDriverWait(driver, 5).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, ".div_question, .field, .question"))
                 )
+            except TimeoutException:
+                logging.warning("页面加载超时，尝试刷新")
+                driver.refresh()
+                time.sleep(1)
+                continue
 
-                # 如果没有题目，尝试点击下一页/开始按钮
-                if not questions:
-                    if self.auto_click_next_page(driver):
-                        continue  # ==== 立即进入下一页循环，无sleep ====
-                    else:
-                        logging.warning("未检测到题目，也未发现可点击的下一页/继续按钮")
-                        break
+            # 获取当前页题目
+            questions = driver.find_elements(
+                By.CSS_SELECTOR,
+                ".field.ui-field-contain, .div_question, .question, .survey-question"
+            )
 
-                total_questions = len(questions)
-                if total_questions == 0:
-                    continue
-
-                # 计算本页答题时间
-                total_time = random.randint(self.config["min_duration"], self.config["max_duration"])
-                start_time = time.time()
-                avg_time_per_question = total_time / total_questions
-                remaining_time = total_time
-                already_filled = set()
-
-                # 填写本页所有题目
-                for i, q in enumerate(questions):
-                    if not self.running:
-                        break
-
-                    q_id = q.get_attribute("id") or f"q_{i}_{current_page}"
-                    if q_id in already_filled:
-                        continue
-
-                    current_question = i + 1
-                    update_progress(current_question, total_questions)
-
-                    # 计算每题时间
-                    if i == total_questions - 1:
-                        question_time = remaining_time
-                    else:
-                        question_time = min(
-                            random.uniform(avg_time_per_question * 0.5, avg_time_per_question * 1.5),
-                            remaining_time - (total_questions - i - 1)
-                        )
-
-                    question_start = time.time()
-
-                    try:
-                        q_type = q.get_attribute("type")
-                        q_num = q_id.replace("div", "") if q_id else str(current_question)
-
-                        # 主动填写
-                        if q_type == "1" or q_type == "2":
-                            self.fill_text(driver, q, q_num)
-                        elif q_type == "3":
-                            self.fill_single(driver, q, q_num)
-                        elif q_type == "4":
-                            self.fill_multiple(driver, q, q_num)
-                        elif q_type == "5":
-                            self.fill_scale(driver, q, q_num)
-                        elif q_type == "6":
-                            self.fill_matrix(driver, q, q_num)
-                        elif q_type == "7":
-                            self.fill_droplist(driver, q, q_num)
-                        elif q_type == "11":
-                            self.fill_reorder(driver, q, q_num)
-                        else:
-                            self.auto_detect_question_type(driver, q, q_num)
-
-                        # 填写后检测
-                        if is_filled(q):
-                            already_filled.add(q_id)
-                        else:
-                            if q_type != "11":
-                                self.auto_detect_question_type(driver, q, q_num)
-                                if is_filled(q):
-                                    already_filled.add(q_id)
-
-                        elapsed = time.time() - question_start
-                        if elapsed < question_time:
-                            time.sleep(question_time - elapsed)
-                        remaining_time -= time.time() - question_start
-
-                    except Exception as e:
-                        logging.error(f"填写第{q_num}题时出错: {str(e)}")
-                        continue
-
-                # 补填本页未填题目
-                questions2 = driver.find_elements(
-                    By.CSS_SELECTOR,
-                    ".field.ui-field-contain, .div_question, .question, .survey-question"
-                )
-                for q in questions2:
-                    q_id = q.get_attribute("id") or ""
-                    if q_id in already_filled:
-                        continue
-
-                    is_required = False
-                    try:
-                        if q.find_element(By.CSS_SELECTOR, ".required, .star, .necessary, .wjxnecessary"):
-                            is_required = True
-                    except:
-                        if "必答" in q.text or q.get_attribute("data-required") == "1":
-                            is_required = True
-
-                    if not is_required and is_filled(q):
-                        continue
-
-                    if not is_filled(q):
-                        q_num = q_id.replace("div", "") if q_id else ""
-                        try:
-                            self.auto_detect_question_type(driver, q, q_num)
-                            if is_filled(q):
-                                already_filled.add(q_id)
-                        except Exception as e:
-                            logging.warning(f"补填题目{q_num}时出错: {e}")
-
-                # 确保本页答题时间
-                elapsed_total = time.time() - start_time
-                if elapsed_total < total_time:
-                    time.sleep(total_time - elapsed_total)
-
-                # 翻页前记录当前URL
-                self.previous_url = driver.current_url
-
-                # 尝试翻页（不再sleep，检测到新页面立即进入下一循环）
+            # 如果没有题目，尝试点击下一页/开始按钮
+            if not questions:
                 if self.auto_click_next_page(driver):
-                    continue  # ==== 无等待，极速进入下一页 ====
+                    current_page += 1
+                    continue
                 else:
-                    logging.info("没有下一页，准备提交问卷")
+                    logging.warning("未检测到题目，也未发现可点击的下一页/继续按钮")
                     break
 
-            # 提交问卷
-            return self.submit_survey(driver)
+            total_questions = len(questions)
+            if total_questions == 0:
+                continue
 
-        except Exception as e:
-            logging.error(f"填写问卷过程中出错: {str(e)}")
-            return False
+            # 计算本页答题时间
+            total_time = random.randint(self.config["min_duration"], self.config["max_duration"])
+            start_time = time.time()
+            avg_time_per_question = total_time / total_questions
+            remaining_time = total_time
+            already_filled = set()
+
+            # 填写本页所有题目
+            for i, q in enumerate(questions):
+                if not self.running:
+                    break
+
+                q_id = q.get_attribute("id") or f"q_{i}_{current_page}"
+                if q_id in already_filled:
+                    continue
+
+                current_question = i + 1
+                self.update_progress(current_question, total_questions, current_page)
+
+                # 计算每题时间
+                if i == total_questions - 1:
+                    question_time = remaining_time
+                else:
+                    question_time = min(
+                        random.uniform(avg_time_per_question * 0.5, avg_time_per_question * 1.5),
+                        remaining_time - (total_questions - i - 1)
+                    )
+
+                question_start = time.time()
+
+                try:
+                    q_type = q.get_attribute("type")
+                    q_num = q_id.replace("div", "") if q_id else str(current_question)
+
+                    # 主动填写
+                    if q_type == "1" or q_type == "2":
+                        self.fill_text(driver, q, q_num)
+                    elif q_type == "3":
+                        self.fill_single(driver, q, q_num)
+                    elif q_type == "4":
+                        self.fill_multiple(driver, q, q_num)
+                    elif q_type == "5":
+                        self.fill_scale(driver, q, q_num)
+                    elif q_type == "6":
+                        self.fill_matrix(driver, q, q_num)
+                    elif q_type == "7":
+                        self.fill_droplist(driver, q, q_num)
+                    elif q_type == "11":
+                        self.fill_reorder(driver, q, q_num)
+                    else:
+                        self.auto_detect_question_type(driver, q, q_num)
+
+                    # 填写后检测
+                    if self.is_filled(q):
+                        already_filled.add(q_id)
+                    else:
+                        if q_type != "11":  # 排序题不需要重试
+                            self.auto_detect_question_type(driver, q, q_num)
+                            if self.is_filled(q):
+                                already_filled.add(q_id)
+
+                    elapsed = time.time() - question_start
+                    if elapsed < question_time:
+                        time.sleep(question_time - elapsed)
+                    remaining_time -= time.time() - question_start
+
+                except Exception as e:
+                    logging.error(f"填写第{q_num}题时出错: {str(e)}")
+                    continue
+
+            # 补填本页未填题目
+            questions2 = driver.find_elements(
+                By.CSS_SELECTOR,
+                ".field.ui-field-contain, .div_question, .question, .survey-question"
+            )
+            for q in questions2:
+                q_id = q.get_attribute("id") or ""
+                if q_id in already_filled:
+                    continue
+
+                is_required = False
+                try:
+                    if q.find_element(By.CSS_SELECTOR, ".required, .star, .necessary, .wjxnecessary"):
+                        is_required = True
+                except:
+                    if "必答" in q.text or q.get_attribute("data-required") == "1":
+                        is_required = True
+
+                if not is_required and self.is_filled(q):
+                    continue
+
+                if not self.is_filled(q):
+                    q_num = q_id.replace("div", "") if q_id else ""
+                    try:
+                        self.auto_detect_question_type(driver, q, q_num)
+                        if self.is_filled(q):
+                            already_filled.add(q_id)
+                    except Exception as e:
+                        logging.warning(f"补填题目{q_num}时出错: {e}")
+
+            # 确保本页答题时间
+            elapsed_total = time.time() - start_time
+            if elapsed_total < total_time:
+                time.sleep(total_time - elapsed_total)
+
+            # 尝试点击下一页
+            if self.auto_click_next_page(driver):
+                current_page += 1
+                continue
+
+            # 如果没有下一页按钮，检查是否真的到最后一页
+            submit_button = driver.find_elements(By.CSS_SELECTOR,
+                                                 "#submit_button, #ctlNext, input[value*='提交'], a.submitbutton, #btnSubmit")
+
+            if not submit_button:
+                logging.warning("未找到提交按钮，可能不是最后一页，尝试刷新")
+                driver.refresh()
+                time.sleep(2)
+                continue
+
+            logging.info("没有下一页，准备提交问卷")
+            return self.submit_survey(driver)
 
     def auto_detect_question_type(self, driver, question, q_num):
         """
@@ -4555,29 +4530,53 @@ class WJXAutoFillApp:
 
         canvas.bind("<Enter>", _bind_mousewheel)
         canvas.bind("<Leave>", _unbind_mousewheel)
-    def update_progress(self):
-        """更新进度显示"""
-        while self.running:
-            try:
-                if self.config["target_num"] > 0:
-                    progress = (self.cur_num / self.config["target_num"]) * 100
-                    self.progress_var.set(progress)
 
-                status = "暂停中..." if self.paused else "运行中..."
-                status += f" 完成: {self.cur_num}/{self.config['target_num']}"
-                if self.cur_fail > 0:
-                    status += f" 失败: {self.cur_fail}"
-                self.status_var.set(status)
+    def update_progress(self, current, total, current_page):
+        """更新题目进度显示"""
+        try:
+            progress = int((current / total) * 100) if total > 0 else 0
+            self.question_progress_var.set(progress)
+            self.question_status_var.set(f"第{current_page}页 题目:{current}/{total}")
+            if hasattr(self, "root"):
+                self.root.update_idletasks()
+        except Exception as e:
+            logging.error(f"更新进度出错: {str(e)}")
 
-                if self.cur_num >= self.config["target_num"]:
-                    self.stop_filling()
-                    messagebox.showinfo("完成", "问卷填写完成！")
-                    break
-
-            except Exception as e:
-                logging.error(f"更新进度时出错: {str(e)}")
-
-            time.sleep(0.5)
+    def is_filled(self, question):
+        """检查问题是否已填写"""
+        try:
+            # 检查排序题
+            if question.find_elements(By.CSS_SELECTOR,
+                                      ".sort-ul, .sortable, .wjx-sortable, .ui-sortable, .sort-container"):
+                return True
+            # 检查 input/textarea/select
+            inputs = question.find_elements(By.CSS_SELECTOR, "input, textarea, select")
+            for inp in inputs:
+                typ = inp.get_attribute("type")
+                if typ in ("checkbox", "radio"):
+                    if inp.is_selected():
+                        return True
+                elif typ in ("text", None):
+                    if inp.get_attribute("value"):
+                        return True
+                elif typ == "select-one":
+                    v = inp.get_attribute("value")
+                    if v and v != "" and v != "请选择":
+                        return True
+            # 检查 contenteditable span
+            spans = question.find_elements(By.CSS_SELECTOR, "span[contenteditable='true']")
+            for span in spans:
+                if span.text.strip():
+                    return True
+                try:
+                    inner = driver.execute_script("return arguments[0].innerText;", span)
+                    if inner and inner.strip():
+                        return True
+                except Exception:
+                    continue
+            return False
+        except Exception:
+            return False
 
     def toggle_pause(self):
         """切换暂停/继续状态"""
