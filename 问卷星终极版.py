@@ -6,6 +6,7 @@ import logging
 import random
 import webbrowser
 import re
+from ai_chat_tab import AIChatTab
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
@@ -399,7 +400,14 @@ class WJXAutoFillApp:
         self.scale_entries = []
 
         self.create_question_settings()
-
+        # 新增AI助手tab
+        self.ai_chat_tab = AIChatTab(
+            self.notebook,
+            api_key_getter=lambda: (
+                self.openai_api_key_entry.get().strip() if self.ai_service.get() == "OpenAI" else self.qingyan_api_key_entry.get().strip()),
+            api_service_getter=lambda: self.ai_service.get()
+        )
+        self.notebook.add(self.ai_chat_tab, text="💬 AI问卷助手")
         # 创建日志区域
         self.create_log_area()
 
@@ -5173,97 +5181,7 @@ class WJXAutoFillApp:
             messagebox.showerror("AI解析失败", f"{e}")
             self.status_var.set("AI结构识别失败")
             self.status_indicator.config(foreground="red")
-import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
-import threading
-import requests
 
-class AIChatTab(ttk.Frame):
-    def __init__(self, master, api_key_getter, model_name="gpt-3.5-turbo"):
-        super().__init__(master)
-        self.api_key_getter = api_key_getter
-        self.model_name = model_name
-        self.history = []
-        self.build_ui()
-
-    def build_ui(self):
-        # 聊天历史区
-        self.text_area = scrolledtext.ScrolledText(self, height=18, wrap=tk.WORD, state='disabled')
-        self.text_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        # 输入区
-        input_frame = ttk.Frame(self)
-        input_frame.pack(fill=tk.X, padx=10, pady=5)
-        self.input_var = tk.StringVar()
-        self.input_entry = ttk.Entry(input_frame, textvariable=self.input_var, width=80)
-        self.input_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.input_entry.bind("<Return>", self.on_send)
-
-        self.send_btn = ttk.Button(input_frame, text="发送", command=self.on_send)
-        self.send_btn.pack(side=tk.LEFT, padx=5)
-
-    def on_send(self, event=None):
-        question = self.input_var.get().strip()
-        if not question:
-            return
-        self.append_history("你", question)
-        self.input_var.set("")
-        self.send_btn.config(state=tk.DISABLED)
-        threading.Thread(target=self.ask_ai, args=(question,), daemon=True).start()
-
-    def append_history(self, who, text):
-        self.text_area.config(state='normal')
-        self.text_area.insert(tk.END, f"{who}: {text}\n")
-        self.text_area.config(state='disabled')
-        self.text_area.see(tk.END)
-
-    def ask_ai(self, question):
-        self.append_history("AI", "（思考中...）")
-        api_key = self.api_key_getter()
-        # 构造上下文
-        messages = [
-            {"role": "system", "content": "你是问卷自动化专家，请用简洁、专业、实用的方式回答用户关于问卷配置、题型设计、自动填写、报错排查等问题。"}
-        ]
-        # 最近6轮上下文
-        for old in self.history[-6:]:
-            messages.append(old)
-        messages.append({"role": "user", "content": question})
-
-        try:
-            resp = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": self.model_name,
-                    "messages": messages,
-                    "temperature": 0.7,
-                    "max_tokens": 800
-                },
-                timeout=60
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            answer = data["choices"][0]["message"]["content"].strip()
-            self.history.append({"role": "user", "content": question})
-            self.history.append({"role": "assistant", "content": answer})
-            # 更新UI
-            self.text_area.config(state='normal')
-            # 删除思考中
-            self.text_area.delete("end-2l", "end-1l")
-            self.text_area.insert(tk.END, f"AI: {answer}\n")
-            self.text_area.config(state='disabled')
-            self.text_area.see(tk.END)
-        except Exception as e:
-            self.text_area.config(state='normal')
-            self.text_area.delete("end-2l", "end-1l")
-            self.text_area.insert(tk.END, f"AI: [出错了: {e}]\n")
-            self.text_area.config(state='disabled')
-            self.text_area.see(tk.END)
-        finally:
-            self.send_btn.config(state=tk.NORMAL)
 if __name__ == "__main__":
     root = ThemedTk(theme="arc")
     root.geometry("1280x900")  # 增大初始窗口尺寸，宽度≥1200
