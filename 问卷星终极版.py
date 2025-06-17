@@ -2302,6 +2302,7 @@ class WJXAutoFillApp:
     def auto_click_next_page(self, driver):
         """
         更鲁棒的问卷星翻页函数：多重检测，保证翻页成功才返回True，否则False。
+        修正版：输出详细日志并返回翻页结果。
         """
         import time
         from selenium.webdriver.common.by import By
@@ -2309,15 +2310,14 @@ class WJXAutoFillApp:
         from selenium.webdriver.support import expected_conditions as EC
         import logging
 
-        # 记录翻页前页面特征
         prev_url = driver.current_url
         try:
             main_questions = driver.find_elements(By.CSS_SELECTOR, ".div_question, .field, .question")
-            prev_q_texts = [q.text[:30] for q in main_questions] if main_questions else []
+            prev_q_texts = [q.text[:30] for q in main_questions if q.is_displayed()] if main_questions else []
         except Exception:
             prev_q_texts = []
 
-        # 优先多种方式查找“下一页”按钮
+        # 多种方式查找“下一页”按钮
         selectors = [
             "#divNext a", "a[id*='NextPage']", "a[onclick*='next']", "button.next",
             "a:contains('下一页')", "button:contains('下一页')"
@@ -2371,7 +2371,7 @@ class WJXAutoFillApp:
             # 2. 题目内容变化
             try:
                 new_questions = driver.find_elements(By.CSS_SELECTOR, ".div_question, .field, .question")
-                new_q_texts = [q.text[:30] for q in new_questions] if new_questions else []
+                new_q_texts = [q.text[:30] for q in new_questions if q.is_displayed()] if new_questions else []
                 if new_q_texts != prev_q_texts and new_q_texts:
                     logging.info("翻页成功：题目内容已变化")
                     return True
@@ -2907,7 +2907,7 @@ class WJXAutoFillApp:
 
     def fill_survey(self, driver):
         """
-        改进翻页和提交逻辑的问卷填写函数（带题目进度局部刷新）。
+        改进版：填写问卷，题目进度条按“实际可见题数”显示，避免统计错误，防死循环/多处理第一页。
         """
         import random
         import time
@@ -2915,10 +2915,11 @@ class WJXAutoFillApp:
         from selenium.webdriver.common.by import By
         from selenium.webdriver.support.ui import WebDriverWait
         from selenium.webdriver.support import expected_conditions as EC
-        from selenium.common.exceptions import TimeoutException
+        from selenium.common.exceptions import TimeoutException, WebDriverException
 
         current_page = 1
         max_pages = 20  # 设置一个合理的最大页数限制
+        processed_urls = set()  # 防止重复处理同一页
 
         while current_page <= max_pages and self.running:
             logging.info(f"正在处理第 {current_page} 页问卷")
@@ -2933,25 +2934,37 @@ class WJXAutoFillApp:
                 driver.refresh()
                 time.sleep(1)
                 continue
+            except WebDriverException as e:
+                logging.error(f"WebDriver异常: {e}")
+                break
 
-            # 获取当前页题目
-            questions = driver.find_elements(
-                By.CSS_SELECTOR,
-                ".field.ui-field-contain, .div_question, .question, .survey-question"
-            )
+            # 获取当前页题目，只统计可见题
+            questions = [
+                q for q in driver.find_elements(
+                    By.CSS_SELECTOR,
+                    ".field.ui-field-contain, .div_question, .question, .survey-question"
+                )
+                if q.is_displayed()
+            ]
+            total_questions = len(questions)
 
-            # 如果没有题目，尝试点击下一页/开始按钮
-            if not questions:
+            # 检查是否重复处理同一页
+            cur_url = driver.current_url
+            # 只要页面内容没变就跳出，防止死循环
+            if cur_url in processed_urls:
+                logging.warning("检测到重复页面，跳出循环避免死循环")
+                break
+            processed_urls.add(cur_url)
+
+            # 如果没有题目，尝试点击下一页或直接退出
+            if total_questions == 0:
+                logging.info("本页无可见题目，尝试翻页")
                 if self.auto_click_next_page(driver):
                     current_page += 1
                     continue
                 else:
-                    logging.warning("未检测到题目，也未发现可点击的下一页/继续按钮")
+                    logging.warning("未检测到可见题目，也未发现可点击的下一页/继续按钮")
                     break
-
-            total_questions = len(questions)
-            if total_questions == 0:
-                continue
 
             # 计算本页答题时间
             total_time = random.randint(self.config["min_duration"], self.config["max_duration"])
@@ -3021,15 +3034,24 @@ class WJXAutoFillApp:
                         time.sleep(question_time - elapsed)
                     remaining_time -= time.time() - question_start
 
+                except WebDriverException as e:
+                    if 'no such window' in str(e).lower():
+                        logging.error("浏览器窗口已关闭或失效，停止本线程填充")
+                        return False
+                    logging.error(f"填写第{q_num}题时WebDriver出错: {str(e)}")
+                    break
                 except Exception as e:
                     logging.error(f"填写第{q_num}题时出错: {str(e)}")
                     continue
 
             # 补填本页未填题目
-            questions2 = driver.find_elements(
-                By.CSS_SELECTOR,
-                ".field.ui-field-contain, .div_question, .question, .survey-question"
-            )
+            questions2 = [
+                q for q in driver.find_elements(
+                    By.CSS_SELECTOR,
+                    ".field.ui-field-contain, .div_question, .question, .survey-question"
+                )
+                if q.is_displayed()
+            ]
             for q in questions2:
                 q_id = q.get_attribute("id") or ""
                 if q_id in already_filled:
@@ -3052,6 +3074,11 @@ class WJXAutoFillApp:
                         self.auto_detect_question_type(driver, q, q_num)
                         if self.is_filled(q):
                             already_filled.add(q_id)
+                    except WebDriverException as e:
+                        if 'no such window' in str(e).lower():
+                            logging.error("浏览器窗口已关闭或失效，停止本线程填充")
+                            return False
+                        logging.warning(f"补填题目{q_num}时WebDriver出错: {e}")
                     except Exception as e:
                         logging.warning(f"补填题目{q_num}时出错: {e}")
 
