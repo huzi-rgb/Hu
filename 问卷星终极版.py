@@ -5029,20 +5029,45 @@ class WJXAutoFillApp:
 
 
     def ai_generate_structure(self):
-        from ai_questionnaire_parser import ai_parse_questionnaire
-        import tkinter.messagebox as messagebox
-        import json
+        """
+        本地+AI双重题型识别，智能辅助纠正量表题等易混题型。
+        结构化流程：
+        1. 本地解析所有题，得到题号、题目、类型。
+        2. AI再分析一遍所有题，输出AI理解的类型。
+        3. 比对同一题号本地类型和AI类型，如果本地为“单选”且AI为“量表”，自动标记为“疑似量表题”。
+        4. 日志栏/界面上高亮显示这些题，提示“建议改为量表题”，可一键应用AI建议。
+        5. 用户确认后，修改题型配置，刷新界面。
+        """
         import logging
+        import tkinter.messagebox as messagebox
+        from ai_questionnaire_parser import ai_parse_questionnaire
 
         api_key = self.qingyan_api_key_entry.get().strip()
         if not api_key:
             messagebox.showerror("错误", "请先填写质谱清言API Key")
             return
 
+        # 1. 本地解析所有题目及类型
+        local_types = {}  # qid: 本地类型
+        local_type_map = {
+            "single_prob": "单选题",
+            "multiple_prob": "多选题",
+            "matrix_prob": "矩阵题",
+            "texts": "填空题",
+            "multiple_texts": "多项填空",
+            "reorder_prob": "排序题",
+            "droplist_prob": "下拉框",
+            "scale_prob": "量表题"
+        }
+        for config_key, type_name in local_type_map.items():
+            for qid in self.config.get(config_key, {}):
+                local_types[str(qid)] = type_name
+
+        # 2. AI分析一遍所有题，输出AI理解的类型
         questions = []
         for qid, qtext in self.config.get("question_texts", {}).items():
             opts = self.config["option_texts"].get(qid, [])
-            questions.append({"text": qtext, "options": opts})
+            questions.append({"id": int(qid), "text": qtext, "options": opts})
 
         self.status_var.set("AI结构识别中...")
         self.status_indicator.config(foreground="orange")
@@ -5056,8 +5081,8 @@ class WJXAutoFillApp:
                 self.status_indicator.config(foreground="red")
                 return
 
-            # ======= 统一题型统计输出（与本地一致顺序） =======
-            type_names = {
+            # 3. 比对同一题号本地类型和AI类型
+            ai_type_map = {
                 "填空": "填空题",
                 "多项填空": "多项填空",
                 "单选": "单选题",
@@ -5067,49 +5092,52 @@ class WJXAutoFillApp:
                 "下拉": "下拉框",
                 "排序": "排序题"
             }
-            ordered_types = ["填空题", "多项填空", "单选题", "多选题", "量表题", "矩阵题", "下拉框", "排序题"]
-            type_count = {name: 0 for name in ordered_types}
-            for q in ai_result["questions"]:
-                typ = q.get("type", "")
-                zh_name = type_names.get(typ, typ)
-                if zh_name in type_count:
-                    type_count[zh_name] += 1
-
-            stats = "，".join(f"{k}：{v}" for k, v in type_count.items())
-            logging.info(f"AI题型统计：{stats}")
-            # ======= END =======
-
-            # 清空旧配置，按AI结果刷新题型设置
-            for key in ["single_prob", "multiple_prob", "matrix_prob", "texts", "multiple_texts", "reorder_prob", "droplist_prob", "scale_prob"]:
-                self.config[key] = {}
-
+            ai_types = {}
             for q in ai_result["questions"]:
                 qid = str(q["id"])
-                typ = q["type"]
-                opts = q.get("options", [])
-                self.config["question_texts"][qid] = q["text"]
-                self.config["option_texts"][qid] = opts
-                if typ == "单选":
-                    self.config["single_prob"][qid] = -1
-                elif typ == "多选":
-                    self.config["multiple_prob"][qid] = {"prob": [50]*len(opts), "min_selection": 1, "max_selection": max(2, len(opts))}
-                elif typ == "量表":
-                    self.config["scale_prob"][qid] = [0.2]*len(opts)
-                elif typ == "矩阵":
-                    self.config["matrix_prob"][qid] = -1
-                elif typ == "排序":
-                    self.config["reorder_prob"][qid] = [0.25]*len(opts)
-                elif typ == "填空":
-                    self.config["texts"][qid] = ["示例答案"]
-                elif typ == "多项填空":
-                    self.config["multiple_texts"][qid] = [["示例答案"]*len(opts)]
-                elif typ == "下拉":
-                    self.config["droplist_prob"][qid] = [0.3]*len(opts)
+                ai_type = ai_type_map.get(q.get("type", ""), q.get("type", ""))
+                ai_types[qid] = ai_type
 
-            messagebox.showinfo("成功", "AI已自动生成题型配置，已刷新题型设置界面。")
+            # 4. 标记疑似量表题（本地为单选，AI为量表）
+            suspect_scale_qids = [
+                qid for qid in local_types
+                if local_types[qid] == "单选题" and ai_types.get(qid) == "量表题"
+            ]
+
+            # 5. 日志栏/弹窗提示，允许一键修正
+            if suspect_scale_qids:
+                msg = "检测到以下题目本地判为【单选题】，AI认为是【量表题】：\n"
+                for qid in suspect_scale_qids:
+                    qtext = self.config["question_texts"].get(qid, "")
+                    msg += f"第{qid}题：{qtext[:30]}\n"
+                msg += "\n是否将这些题型自动改为量表题？（建议采纳，如内容确实为Likert量表）"
+                logging.warning("疑似量表题：" + "、".join(suspect_scale_qids))
+                if messagebox.askyesno("AI建议", msg):
+                    # 应用修正
+                    for qid in suspect_scale_qids:
+                        # 移除单选题配置
+                        if qid in self.config["single_prob"]: del self.config["single_prob"][qid]
+                        # 添加量表题配置
+                        opts = self.config["option_texts"].get(qid, [])
+                        self.config["scale_prob"][qid] = [0.2] * len(opts)
+                    logging.info(f"已将{len(suspect_scale_qids)}道题型改为量表题。")
+                    self.reload_question_settings()
+                    messagebox.showinfo("修正完成", "已自动修正疑似量表题，题型设置已刷新。")
+                else:
+                    logging.info("用户未采纳AI量表修正建议。")
+            else:
+                logging.info("未检测到需修正的疑似量表题。")
+
+            # 6. 输出AI题型统计
+            type_count = {name: 0 for name in ai_type_map.values()}
+            for typ in ai_types.values():
+                if typ in type_count:
+                    type_count[typ] += 1
+            stats = "，".join(f"{k}:{v}" for k, v in type_count.items())
+            logging.info(f"AI题型统计：{stats}")
+
             self.status_var.set("AI结构识别完成")
             self.status_indicator.config(foreground="green")
-            self.reload_question_settings()
 
         except Exception as e:
             import traceback
