@@ -404,8 +404,10 @@ class WJXAutoFillApp:
         self.ai_chat_tab = AIChatTab(
             self.notebook,
             api_key_getter=lambda: (
-                self.openai_api_key_entry.get().strip() if self.ai_service.get() == "OpenAI" else self.qingyan_api_key_entry.get().strip()),
-            api_service_getter=lambda: self.ai_service.get()
+                self.openai_api_key_entry.get().strip() if self.ai_service.get() == "OpenAI" else self.qingyan_api_key_entry.get().strip()
+            ),
+            api_service_getter=lambda: self.ai_service.get(),
+            app_ref=self  # 关键：把当前主程序实例传给 AIChatTab
         )
         self.notebook.add(self.ai_chat_tab, text="💬 AI问卷助手")
         # 创建日志区域
@@ -5181,6 +5183,57 @@ class WJXAutoFillApp:
             messagebox.showerror("AI解析失败", f"{e}")
             self.status_var.set("AI结构识别失败")
             self.status_indicator.config(foreground="red")
+
+
+    def set_param(self, key, value):
+        """设置全局参数如目标份数"""
+        if key in self.config:
+            self.config[key] = value
+            self.reload_question_settings()
+            return True, f"{key} 已修改为 {value}"
+        return False, f"参数 {key} 不存在"
+
+    def get_param(self, key):
+        """查询参数"""
+        return self.config.get(key, f"参数 {key} 不存在")
+
+    def set_question_type(self, q_num, q_type):
+        """设置题型"""
+        q_num = str(q_num)
+        # 移除所有题型配置
+        for config_key in [
+            "single_prob", "multiple_prob", "matrix_prob", "texts", "multiple_texts",
+            "reorder_prob", "droplist_prob", "scale_prob"
+        ]:
+            self.config[config_key].pop(q_num, None)
+        # 重新放入新题型
+        option_count = len(self.config["option_texts"].get(q_num, []))
+        if q_type == "单选题":
+            self.config["single_prob"][q_num] = -1
+        elif q_type == "多选题":
+            self.config["multiple_prob"][q_num] = {
+                "prob": [50] * option_count,
+                "min_selection": 1,
+                "max_selection": max(option_count, 1)
+            }
+        # ...补充其它类型...
+        self.reload_question_settings()
+        return True, f"第{q_num}题已修改为{q_type}"
+
+    def set_prob(self, q_num, probs):
+        """设置概率（单选/多选/下拉等）"""
+        q_num = str(q_num)
+        if q_num in self.config.get("single_prob", {}):
+            self.config["single_prob"][q_num] = probs
+        elif q_num in self.config.get("multiple_prob", {}):
+            self.config["multiple_prob"][q_num]["prob"] = probs
+        elif q_num in self.config.get("droplist_prob", {}):
+            self.config["droplist_prob"][q_num] = probs
+        else:
+            return False, f"第{q_num}题暂不支持概率设置"
+        self.reload_question_settings()
+        return True, f"第{q_num}题概率已设置为 {probs}"
+
 
 if __name__ == "__main__":
     root = ThemedTk(theme="arc")

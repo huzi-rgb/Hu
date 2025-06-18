@@ -6,14 +6,14 @@ import time
 import json
 import re
 
-
 class AIChatTab(ttk.Frame):
-    def __init__(self, master, api_key_getter, api_service_getter, model_name="gpt-3.5-turbo"):
+    def __init__(self, master, api_key_getter, api_service_getter, app_ref=None, model_name="gpt-3.5-turbo"):
         super().__init__(master)
         self.api_key_getter = api_key_getter
         self.api_service_getter = api_service_getter
         self.model_name = model_name
         self.history = []
+        self.app_ref = app_ref  # 主程序引用，便于参数操作
         self.build_ui()
         self.add_welcome_message()
 
@@ -121,7 +121,12 @@ class AIChatTab(ttk.Frame):
             "1. 分析问卷结构和要求\n"
             "2. 生成符合问卷要求的答案\n"
             "3. 提取关键信息并整理答案\n"
-            "4. 解释问卷中的复杂问题\n\n"
+            "4. 解释问卷中的复杂问题\n"
+            "5. 支持直接用自然语言控制问卷参数，比如输入：\n"
+            "   - 目标份数改为200\n"
+            "   - 第3题改成多选题\n"
+            "   - 第2题概率改成0.3,0.7\n"
+            "   - 第4题是什么题型\n"
             "请将问卷内容粘贴给我，或直接提出您的问题。"
         )
         self.add_message("AI助手", welcome_msg, "ai")
@@ -145,11 +150,13 @@ class AIChatTab(ttk.Frame):
         self.chat_history.config(state='disabled')
 
     def on_send(self, event=None):
-        """发送消息"""
         message = self.input_var.get().strip()
         if not message:
             return
-
+        # 先尝试参数指令
+        if self.try_handle_param_command(message):
+            self.input_var.set("")
+            return
         # 添加用户消息
         self.add_message("用户", message)
         self.history.append({"role": "user", "content": message})
@@ -166,6 +173,68 @@ class AIChatTab(ttk.Frame):
 
         # 启动新线程获取AI回复
         threading.Thread(target=self.get_ai_response, daemon=True).start()
+
+    def try_handle_param_command(self, message):
+        """
+        检查并处理参数修改指令。
+        支持的样例：
+        - 目标份数改为200
+        - 第3题改成多选题
+        - 第2题概率改成0.3,0.7
+        - 目标份数是多少
+        - 第4题是什么题型
+        """
+        if not self.app_ref:
+            return False
+        # 支持的类型
+        # 改目标份数
+        m = re.match(r"目标[份数]*[为|改为|设置为|=](\d+)", message)
+        if m:
+            n = int(m.group(1))
+            ok, msg = self.app_ref.set_param("target_num", n)
+            self.add_message("系统", msg, "system")
+            return True
+
+        # 改题型
+        m = re.match(r"第(\d+)题[型|题型|类型]*[为|改为|设置为|=](.+)", message)
+        if m:
+            q_num, q_type = m.group(1), m.group(2).strip()
+            ok, msg = self.app_ref.set_question_type(q_num, q_type)
+            self.add_message("系统", msg, "system")
+            return True
+
+        # 改概率
+        m = re.match(r"第(\d+)题概率[为|改为|设置为|=]([\d\., ]+)", message)
+        if m:
+            q_num, value = m.group(1), m.group(2)
+            probs = [float(x.strip()) for x in value.split(",") if x.strip()]
+            ok, msg = self.app_ref.set_prob(q_num, probs)
+            self.add_message("系统", msg, "system")
+            return True
+
+        # 查询目标份数
+        m = re.match(r"目标[份数]*[多少|现在|是多少|的值]", message)
+        if m:
+            val = self.app_ref.get_param("target_num")
+            self.add_message("系统", f"当前目标份数为：{val}", "system")
+            return True
+
+        # 查询题型
+        m = re.match(r"第(\d+)题.*(题型|类型|是什么)", message)
+        if m:
+            q_num = str(m.group(1))
+            type_map = {
+                "single_prob": "单选题", "multiple_prob": "多选题", "matrix_prob": "矩阵题", "texts": "填空题",
+                "multiple_texts": "多项填空", "reorder_prob": "排序题", "droplist_prob": "下拉框", "scale_prob": "量表题"
+            }
+            found = "未知"
+            for key, name in type_map.items():
+                if q_num in self.app_ref.config.get(key, {}):
+                    found = name
+            self.add_message("系统", f"第{q_num}题的题型为：{found}", "system")
+            return True
+
+        return False
 
     def get_ai_response(self):
         """获取AI回复"""
