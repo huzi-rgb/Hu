@@ -5184,21 +5184,81 @@ class WJXAutoFillApp:
             self.status_var.set("AI结构识别失败")
             self.status_indicator.config(foreground="red")
 
+# 在 WJXAutoFillApp 类内，替换以下方法
 
     def set_param(self, key, value):
-        """设置全局参数如目标份数"""
+        """
+        设置全局参数如目标份数，并同步界面控件的值
+        """
         if key in self.config:
             self.config[key] = value
-            self.reload_question_settings()
+            # --- 同步到控件 ---
+            if key == "target_num":
+                self.target_entry.set(str(value))
+            elif key == "weixin_ratio":
+                self.ratio_scale.set(value)
+                self.ratio_var.set(f"{value * 100:.0f}%")
+            elif key == "min_duration":
+                self.min_duration.set(str(value))
+            elif key == "max_duration":
+                self.max_duration.set(str(value))
+            elif key == "min_delay":
+                self.min_delay.set(str(value))
+            elif key == "max_delay":
+                self.max_delay.set(str(value))
+            elif key == "num_threads":
+                self.num_threads.set(str(value))
+            elif key == "headless":
+                self.headless_var.set(bool(value))
+            elif key == "use_ip":
+                self.use_ip_var.set(bool(value))
+            elif key == "ip_api":
+                self.ip_entry.delete(0, 'end')
+                self.ip_entry.insert(0, str(value))
+            elif key == "ip_change_mode":
+                self.ip_change_mode.set(str(value))
+            elif key == "ip_change_batch":
+                self.ip_change_batch.set(str(value))
+            elif key == "min_submit_gap":
+                self.min_submit_gap.set(str(value))
+            elif key == "max_submit_gap":
+                self.max_submit_gap.set(str(value))
+            elif key == "batch_size":
+                self.batch_size.set(str(value))
+            elif key == "batch_pause":
+                self.batch_pause.set(str(value))
+            elif key == "openai_api_key":
+                self.openai_api_key_entry.delete(0, 'end')
+                self.openai_api_key_entry.insert(0, str(value))
+            elif key == "qingyan_api_key":
+                self.qingyan_api_key_entry.delete(0, 'end')
+                self.qingyan_api_key_entry.insert(0, str(value))
+            elif key == "ai_service":
+                self.ai_service.set(str(value))
+            elif key == "ai_fill_enabled":
+                self.ai_fill_var.set(bool(value))
+            elif key == "ai_prompt_template":
+                self.ai_prompt_combobox.set(str(value))
+            # 可以按需补充其它 config key 的同步
+
+            self.reload_question_settings()  # 保证题型设置刷新
             return True, f"{key} 已修改为 {value}"
         return False, f"参数 {key} 不存在"
 
     def get_param(self, key):
-        """查询参数"""
+        """查询参数值"""
+        # 建议同步控件的显示值
+        if key == "target_num":
+            return self.target_entry.get()
+        if key == "weixin_ratio":
+            return self.ratio_scale.get()
+        # 其它参数可直接返回config
         return self.config.get(key, f"参数 {key} 不存在")
 
     def set_question_type(self, q_num, q_type):
-        """设置题型"""
+        """
+        设置题型，同时刷新界面
+        """
         q_num = str(q_num)
         # 移除所有题型配置
         for config_key in [
@@ -5216,17 +5276,37 @@ class WJXAutoFillApp:
                 "min_selection": 1,
                 "max_selection": max(option_count, 1)
             }
-        # ...补充其它类型...
+        elif q_type == "矩阵题":
+            self.config["matrix_prob"][q_num] = -1
+        elif q_type == "填空题":
+            self.config["texts"][q_num] = ["示例答案"]
+        elif q_type == "多项填空":
+            self.config["multiple_texts"][q_num] = [["示例答案"]] * (option_count or 1)
+        elif q_type == "排序题":
+            self.config["reorder_prob"][q_num] = [0.25] * (option_count or 1)
+        elif q_type == "下拉框":
+            self.config["droplist_prob"][q_num] = [0.3] * (option_count or 1)
+        elif q_type == "量表题":
+            self.config["scale_prob"][q_num] = [0.2] * (option_count or 1)
+        else:
+            return False, f"暂不支持的题型：{q_type}"
+
         self.reload_question_settings()
         return True, f"第{q_num}题已修改为{q_type}"
 
     def set_prob(self, q_num, probs):
-        """设置概率（单选/多选/下拉等）"""
+        """
+        设置概率（单选/多选/下拉等），同步刷新界面
+        """
         q_num = str(q_num)
+        # 单选题
         if q_num in self.config.get("single_prob", {}):
-            self.config["single_prob"][q_num] = probs
+            self.config["single_prob"][q_num] = probs if probs else -1
+        # 多选题
         elif q_num in self.config.get("multiple_prob", {}):
-            self.config["multiple_prob"][q_num]["prob"] = probs
+            if isinstance(probs, list):
+                self.config["multiple_prob"][q_num]["prob"] = probs
+        # 下拉
         elif q_num in self.config.get("droplist_prob", {}):
             self.config["droplist_prob"][q_num] = probs
         else:
