@@ -404,10 +404,11 @@ class WJXAutoFillApp:
         self.ai_chat_tab = AIChatTab(
             self.notebook,
             api_key_getter=lambda: (
-                self.openai_api_key_entry.get().strip() if self.ai_service.get() == "OpenAI" else self.qingyan_api_key_entry.get().strip()
+                self.openai_api_key_entry.get().strip() if self.ai_service.get() == "OpenAI"
+                else self.qingyan_api_key_entry.get().strip()
             ),
             api_service_getter=lambda: self.ai_service.get(),
-            app_ref=self  # 关键：把当前主程序实例传给 AIChatTab
+            app_ref=self
         )
         self.notebook.add(self.ai_chat_tab, text="💬 AI问卷助手")
         # 创建日志区域
@@ -5037,7 +5038,164 @@ class WJXAutoFillApp:
         delay = random.uniform(min_time, max_time)
         time.sleep(delay)
 
+    def set_blank_texts(self, qid, answers):
+        """
+        设置指定填空题的答案池，并同步更新对应UI控件（如存在）。
+        :param qid: 题目编号（int或str）
+        :param answers: 答案列表（list of str）
+        """
+        qid_str = str(qid)
+        # 更新数据
+        if "texts" not in self.config:
+            self.config["texts"] = {}
+        self.config["texts"][qid_str] = answers
 
+        # 如果有UI控件，自动同步显示
+        if hasattr(self, 'blank_text_widget') and qid_str in self.blank_text_widget:
+            widget = self.blank_text_widget[qid_str]
+            widget.delete("1.0", "end")
+            for ans in answers:
+                widget.insert("end", ans + "\n")
+        # 可选：通知其它模块或刷新
+        # self.refresh_some_ui_if_needed()
+    def generate_sample_answers(self, num):
+        """
+        批量生成num份问卷模拟答案，返回文本或保存到文件。
+        支持AI生成和本地随机生成，自动推断题型和配置。
+        """
+        import random
+        import json
+
+        answers_list = []
+        for _ in range(num):
+            answer = {}
+            for qid, qtext in self.config.get("question_texts", {}).items():
+                # 优先选题型
+                qid_str = str(qid)
+                # 单选题
+                if qid_str in self.config.get("single_prob", {}):
+                    options = self.config.get("option_texts", {}).get(qid_str, [])
+                    probs = self.config["single_prob"][qid_str]
+                    if probs == -1 or not isinstance(probs, list):
+                        idx = random.randint(0, len(options) - 1)
+                    else:
+                        total = sum(probs)
+                        weights = [p / total for p in probs] if total > 0 else [1 / len(options)] * len(options)
+                        idx = random.choices(range(len(options)), weights=weights)[0]
+                    answer[qtext] = options[idx] if idx < len(options) else ""
+                # 多选题
+                elif qid_str in self.config.get("multiple_prob", {}):
+                    options = self.config.get("option_texts", {}).get(qid_str, [])
+                    conf = self.config["multiple_prob"][qid_str]
+                    probs = conf.get("prob", [50] * len(options))
+                    min_sel = conf.get("min_selection", 1)
+                    max_sel = conf.get("max_selection", max(1, len(options)))
+                    sel = []
+                    for i, p in enumerate(probs):
+                        if random.random() < p / 100:
+                            sel.append(options[i] if i < len(options) else "")
+                    if len(sel) < min_sel:
+                        left = [o for i, o in enumerate(options) if o not in sel]
+                        sel += random.sample(left, min(min_sel - len(sel), len(left)))
+                    if len(sel) > max_sel:
+                        sel = random.sample(sel, max_sel)
+                    answer[qtext] = ",".join(sel)
+                # 下拉框
+                elif qid_str in self.config.get("droplist_prob", {}):
+                    options = self.config.get("option_texts", {}).get(qid_str, [])
+                    probs = self.config["droplist_prob"][qid_str]
+                    total = sum(probs)
+                    weights = [p / total for p in probs] if total > 0 else [1 / len(options)] * len(options)
+                    idx = random.choices(range(len(options)), weights=weights)[0]
+                    answer[qtext] = options[idx] if idx < len(options) else ""
+                # 填空题
+                elif qid_str in self.config.get("texts", {}):
+                    texts = self.config["texts"][qid_str]
+                    answer[qtext] = random.choice(texts) if texts else ""
+                # 多项填空
+                elif qid_str in self.config.get("multiple_texts", {}):
+                    ans_lists = self.config["multiple_texts"][qid_str]
+                    ans = [random.choice(a) if a else "" for a in ans_lists]
+                    answer[qtext] = ";".join(ans)
+                # 排序题
+                elif qid_str in self.config.get("reorder_prob", {}):
+                    options = self.config.get("option_texts", {}).get(qid_str, [])
+                    order = options[:]
+                    random.shuffle(order)
+                    answer[qtext] = "->".join(order)
+                # 量表题、矩阵题等
+                elif qid_str in self.config.get("scale_prob", {}):
+                    options = self.config.get("option_texts", {}).get(qid_str, [])
+                    probs = self.config["scale_prob"][qid_str]
+                    total = sum(probs)
+                    weights = [p / total for p in probs] if total > 0 else [1 / len(options)] * len(options)
+                    idx = random.choices(range(len(options)), weights=weights)[0]
+                    answer[qtext] = options[idx] if idx < len(options) else ""
+                elif qid_str in self.config.get("matrix_prob", {}):
+                    options = self.config.get("option_texts", {}).get(qid_str, [])
+                    answer[qtext] = random.choice(options) if options else ""
+                else:
+                    answer[qtext] = ""
+            answers_list.append(answer)
+        # 可选：保存到文件/返回
+        try:
+            with open("sample_answers.json", "w", encoding="utf-8") as f:
+                json.dump(answers_list, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return answers_list
+
+    def check_params(self):
+        """
+        检查当前参数设置的合理性，返回建议和自动修复提示。
+        """
+        tips = []
+        # 目标份数
+        try:
+            target = int(self.config.get("target_num", 0))
+            if target <= 0:
+                tips.append("目标份数应大于0。")
+        except Exception:
+            tips.append("目标份数设置异常。")
+        # 微信比例
+        ratio = self.config.get("weixin_ratio", 0.5)
+        if not (0 <= ratio <= 1):
+            tips.append("微信比例应为0~1之间。")
+        # 时间区间
+        min_d, max_d = self.config.get("min_duration", 1), self.config.get("max_duration", 20)
+        if min_d > max_d:
+            tips.append("最短时长不能大于最长时长。")
+        # 线程数
+        threads = self.config.get("num_threads", 4)
+        if threads < 1 or threads > 20:
+            tips.append("线程数应在1~20之间，建议4~8。")
+        # 延迟
+        min_delay, max_delay = self.config.get("min_delay", 1), self.config.get("max_delay", 2)
+        if min_delay > max_delay:
+            tips.append("最小延迟应小于最大延迟。")
+        # 批量/休息
+        batch_size = self.config.get("batch_size", 5)
+        batch_pause = self.config.get("batch_pause", 15)
+        if batch_size < 1:
+            tips.append("批量份数应≥1。")
+        if batch_pause < 0:
+            tips.append("批量休息时间应≥0分钟。")
+        # 题型/概率检查
+        for qid, qtext in self.config.get("question_texts", {}).items():
+            qid_str = str(qid)
+            if qid_str in self.config.get("single_prob", {}):
+                probs = self.config["single_prob"][qid_str]
+                if isinstance(probs, list) and abs(sum(probs) - 1) > 0.01 and all(p >= 0 for p in probs):
+                    tips.append(f"第{qid}题单选概率和不为1，建议调整。")
+            if qid_str in self.config.get("multiple_prob", {}):
+                conf = self.config["multiple_prob"][qid_str]
+                min_sel = conf.get("min_selection", 1)
+                max_sel = conf.get("max_selection", 1)
+                if min_sel > max_sel:
+                    tips.append(f"第{qid}题多选最小选择数大于最大选择数，请检查。")
+        if not tips:
+            return "参数设置正常，无需优化。"
+        return "\n".join(tips)
     def ai_generate_structure(self):
         """
         本地+AI双重题型识别，AI辅助判别，自动清洗AI返回的非标准JSON，解决‘AI解析失败’弹窗，支持一键修正量表题。
@@ -5184,135 +5342,199 @@ class WJXAutoFillApp:
             self.status_var.set("AI结构识别失败")
             self.status_indicator.config(foreground="red")
 
-# 在 WJXAutoFillApp 类内，替换以下方法
-
     def set_param(self, key, value):
-        """
-        设置全局参数如目标份数，并同步界面控件的值
-        """
-        if key in self.config:
-            self.config[key] = value
-            # --- 同步到控件 ---
-            if key == "target_num":
-                self.target_entry.set(str(value))
-            elif key == "weixin_ratio":
-                self.ratio_scale.set(value)
-                self.ratio_var.set(f"{value * 100:.0f}%")
-            elif key == "min_duration":
+        """通用参数设置方法，既修改config，又同步所有相关UI控件的值"""
+        self.config[key] = value
+
+        # 统一UI控件同步（需要根据你的控件变量名调整补充）
+        if key == "url":
+            if hasattr(self, "url_entry"):
+                self.url_entry.delete(0, tk.END)
+                self.url_entry.insert(0, str(value))
+        elif key == "target_num":
+            if hasattr(self, "target_entry"):
+                self.target_entry.delete(0, tk.END)
+                self.target_entry.insert(0, str(value))
+        elif key == "weixin_ratio":
+            if hasattr(self, "ratio_scale"):
+                self.ratio_scale.set(float(value))
+            if hasattr(self, "ratio_var"):
+                self.ratio_var.set(f"{float(value) * 100:.0f}%")
+        elif key == "min_duration":
+            if hasattr(self, "min_duration"):
                 self.min_duration.set(str(value))
-            elif key == "max_duration":
+        elif key == "max_duration":
+            if hasattr(self, "max_duration"):
                 self.max_duration.set(str(value))
-            elif key == "min_delay":
+        elif key == "min_delay":
+            if hasattr(self, "min_delay"):
                 self.min_delay.set(str(value))
-            elif key == "max_delay":
+        elif key == "max_delay":
+            if hasattr(self, "max_delay"):
                 self.max_delay.set(str(value))
-            elif key == "num_threads":
+        elif key == "submit_delay":
+            if hasattr(self, "submit_delay"):
+                self.submit_delay.set(str(value))
+        elif key == "num_threads":
+            if hasattr(self, "num_threads"):
                 self.num_threads.set(str(value))
-            elif key == "headless":
-                self.headless_var.set(bool(value))
-            elif key == "use_ip":
+        elif key == "use_ip":
+            if hasattr(self, "use_ip_var"):
                 self.use_ip_var.set(bool(value))
-            elif key == "ip_api":
-                self.ip_entry.delete(0, 'end')
+        elif key == "ip_api":
+            if hasattr(self, "ip_entry"):
+                self.ip_entry.delete(0, tk.END)
                 self.ip_entry.insert(0, str(value))
-            elif key == "ip_change_mode":
+        elif key == "ip_change_mode":
+            if hasattr(self, "ip_change_mode"):
                 self.ip_change_mode.set(str(value))
-            elif key == "ip_change_batch":
+        elif key == "ip_change_batch":
+            if hasattr(self, "ip_change_batch"):
                 self.ip_change_batch.set(str(value))
-            elif key == "min_submit_gap":
+        elif key == "headless":
+            if hasattr(self, "headless_var"):
+                self.headless_var.set(bool(value))
+        elif key == "enable_smart_gap":
+            if hasattr(self, "enable_smart_gap_var"):
+                self.enable_smart_gap_var.set(bool(value))
+        elif key == "min_submit_gap":
+            if hasattr(self, "min_submit_gap"):
                 self.min_submit_gap.set(str(value))
-            elif key == "max_submit_gap":
+        elif key == "max_submit_gap":
+            if hasattr(self, "max_submit_gap"):
                 self.max_submit_gap.set(str(value))
-            elif key == "batch_size":
+        elif key == "batch_size":
+            if hasattr(self, "batch_size"):
                 self.batch_size.set(str(value))
-            elif key == "batch_pause":
+        elif key == "batch_pause":
+            if hasattr(self, "batch_pause"):
                 self.batch_pause.set(str(value))
-            elif key == "openai_api_key":
-                self.openai_api_key_entry.delete(0, 'end')
-                self.openai_api_key_entry.insert(0, str(value))
-            elif key == "qingyan_api_key":
-                self.qingyan_api_key_entry.delete(0, 'end')
-                self.qingyan_api_key_entry.insert(0, str(value))
-            elif key == "ai_service":
+        elif key == "ai_service":
+            if hasattr(self, "ai_service"):
                 self.ai_service.set(str(value))
-            elif key == "ai_fill_enabled":
+        elif key == "ai_fill_enabled":
+            if hasattr(self, "ai_fill_var"):
                 self.ai_fill_var.set(bool(value))
-            elif key == "ai_prompt_template":
+        elif key == "openai_api_key":
+            if hasattr(self, "openai_api_key_entry"):
+                self.openai_api_key_entry.delete(0, tk.END)
+                self.openai_api_key_entry.insert(0, str(value))
+        elif key == "qingyan_api_key":
+            if hasattr(self, "qingyan_api_key_entry"):
+                self.qingyan_api_key_entry.delete(0, tk.END)
+                self.qingyan_api_key_entry.insert(0, str(value))
+        elif key == "ai_prompt_template":
+            if hasattr(self, "ai_prompt_combobox"):
                 self.ai_prompt_combobox.set(str(value))
-            # 可以按需补充其它 config key 的同步
+        # 你可以继续添加其他参数和控件的同步...
 
-            self.reload_question_settings()  # 保证题型设置刷新
-            return True, f"{key} 已修改为 {value}"
-        return False, f"参数 {key} 不存在"
+        # 部分参数（如题型设置等）可能需要刷新界面
+        # 如果有相关刷新方法可调用
+        if hasattr(self, "reload_question_settings"):
+            self.reload_question_settings()
 
-    def get_param(self, key):
-        """查询参数值"""
-        # 建议同步控件的显示值
-        if key == "target_num":
-            return self.target_entry.get()
-        if key == "weixin_ratio":
-            return self.ratio_scale.get()
-        # 其它参数可直接返回config
-        return self.config.get(key, f"参数 {key} 不存在")
+        return True, f"{key} 已修改为 {value}"
 
     def set_question_type(self, q_num, q_type):
-        """
-        设置题型，同时刷新界面
-        """
+        """设置指定题号的题型"""
         q_num = str(q_num)
-        # 移除所有题型配置
+        if q_num not in self.config["question_texts"]:
+            return False, f"题目 {q_num} 不存在"
+        # 清除该题在所有题型配置里的记录
         for config_key in [
             "single_prob", "multiple_prob", "matrix_prob", "texts", "multiple_texts",
             "reorder_prob", "droplist_prob", "scale_prob"
         ]:
-            self.config[config_key].pop(q_num, None)
-        # 重新放入新题型
+            if q_num in self.config[config_key]:
+                del self.config[config_key][q_num]
+        # 加入新题型
+        type_map = {
+            "单选题": "single_prob",
+            "多选题": "multiple_prob",
+            "矩阵题": "matrix_prob",
+            "填空题": "texts",
+            "多项填空": "multiple_texts",
+            "排序题": "reorder_prob",
+            "下拉框": "droplist_prob",
+            "量表题": "scale_prob"
+        }
+        q_type_key = type_map.get(q_type)
+        if not q_type_key:
+            return False, f"不支持的类型: {q_type}"
         option_count = len(self.config["option_texts"].get(q_num, []))
-        if q_type == "单选题":
+        if q_type_key == "single_prob":
             self.config["single_prob"][q_num] = -1
-        elif q_type == "多选题":
+        elif q_type_key == "multiple_prob":
             self.config["multiple_prob"][q_num] = {
                 "prob": [50] * option_count,
                 "min_selection": 1,
-                "max_selection": max(option_count, 1)
+                "max_selection": max(1, option_count)
             }
-        elif q_type == "矩阵题":
+        elif q_type_key == "texts":
+            self.config["texts"][q_num] = ["自动填写内容"]
+        elif q_type_key == "multiple_texts":
+            self.config["multiple_texts"][q_num] = [["自动填写内容"]] * option_count
+        elif q_type_key == "matrix_prob":
             self.config["matrix_prob"][q_num] = -1
-        elif q_type == "填空题":
-            self.config["texts"][q_num] = ["示例答案"]
-        elif q_type == "多项填空":
-            self.config["multiple_texts"][q_num] = [["示例答案"]] * (option_count or 1)
-        elif q_type == "排序题":
-            self.config["reorder_prob"][q_num] = [0.25] * (option_count or 1)
-        elif q_type == "下拉框":
-            self.config["droplist_prob"][q_num] = [0.3] * (option_count or 1)
-        elif q_type == "量表题":
-            self.config["scale_prob"][q_num] = [0.2] * (option_count or 1)
-        else:
-            return False, f"暂不支持的题型：{q_type}"
-
+        elif q_type_key == "reorder_prob":
+            self.config["reorder_prob"][q_num] = [0.25] * option_count
+        elif q_type_key == "droplist_prob":
+            self.config["droplist_prob"][q_num] = [0.3] * option_count
+        elif q_type_key == "scale_prob":
+            self.config["scale_prob"][q_num] = [0.2] * option_count
         self.reload_question_settings()
         return True, f"第{q_num}题已修改为{q_type}"
 
-    def set_prob(self, q_num, probs):
-        """
-        设置概率（单选/多选/下拉等），同步刷新界面
-        """
+    def set_question_prob(self, q_num, probs):
+        """设置题目选项概率"""
         q_num = str(q_num)
-        # 单选题
-        if q_num in self.config.get("single_prob", {}):
-            self.config["single_prob"][q_num] = probs if probs else -1
-        # 多选题
-        elif q_num in self.config.get("multiple_prob", {}):
-            if isinstance(probs, list):
-                self.config["multiple_prob"][q_num]["prob"] = probs
-        # 下拉
-        elif q_num in self.config.get("droplist_prob", {}):
-            self.config["droplist_prob"][q_num] = probs
-        else:
-            return False, f"第{q_num}题暂不支持概率设置"
+        for config_key in [
+            "single_prob", "multiple_prob", "matrix_prob",
+            "reorder_prob", "droplist_prob", "scale_prob"
+        ]:
+            if q_num in self.config[config_key]:
+                if config_key == "multiple_prob":
+                    if isinstance(self.config[config_key][q_num]["prob"], list):
+                        self.config[config_key][q_num]["prob"] = probs
+                else:
+                    self.config[config_key][q_num] = probs
+                self.reload_question_settings()
+                return True, f"第{q_num}题概率已设置为: {probs}"
+        return False, f"未找到题目 {q_num} 的概率配置"
+
+    def get_param(self, key):
+        """获取参数值"""
+        if key in self.config:
+            return True, f"{key} = {self.config[key]}"
+        return False, f"参数 {key} 不存在"
+
+    def get_question_type(self, q_num):
+        """获取题目类型"""
+        q_num = str(q_num)
+        type_map = {
+            "single_prob": "单选题",
+            "multiple_prob": "多选题",
+            "matrix_prob": "矩阵题",
+            "texts": "填空题",
+            "multiple_texts": "多项填空",
+            "reorder_prob": "排序题",
+            "droplist_prob": "下拉框",
+            "scale_prob": "量表题"
+        }
+        for key, name in type_map.items():
+            if q_num in self.config[key]:
+                return True, f"第{q_num}题是{name}"
+        return False, f"未找到题目 {q_num} 的类型"
+
+    def update_ui_from_config(self):
+        """根据配置更新UI控件"""
+        self.url_entry.delete(0, tk.END)
+        self.url_entry.insert(0, self.config["url"])
+        self.target_entry.delete(0, tk.END)
+        self.target_entry.insert(0, str(self.config["target_num"]))
+        self.ratio_scale.set(self.config["weixin_ratio"])
+        self.update_ratio_display()
         self.reload_question_settings()
-        return True, f"第{q_num}题概率已设置为 {probs}"
 
 
 if __name__ == "__main__":
