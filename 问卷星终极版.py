@@ -2249,41 +2249,67 @@ class WJXAutoFillApp:
             )
 
     def create_scale_settings(self, frame):
+        """创建量表题设置界面 - 修复刻度数量问题"""
         padx, pady = 4, 2
+        # 创建描述框架
         desc_frame = ttk.LabelFrame(frame, text="量表题配置说明")
         desc_frame.pack(fill=tk.X, padx=padx, pady=pady)
         ttk.Label(desc_frame, text="• 概率越高，被选中的几率越大", font=("Arial", 9)).pack(anchor=tk.W)
+
+        # 创建表格框架
         table_frame = ttk.Frame(frame)
         table_frame.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
+
+        # 表头
         headers = ["题号", "题目预览", "刻度概率配置及操作"]
         for col, header in enumerate(headers):
-            ttk.Label(table_frame, text=header, font=("Arial", 9, "bold")).grid(row=0, column=col, padx=padx, pady=pady,
-                                                                                sticky=tk.W)
+            ttk.Label(table_frame, text=header, font=("Arial", 9, "bold")).grid(
+                row=0, column=col, padx=padx, pady=pady, sticky=tk.W)
+
+        # 遍历所有量表题配置
         for row_idx, (q_num, probs) in enumerate(self.config["scale_prob"].items(), start=1):
             base_row = row_idx * 2
             q_text = self.config["question_texts"].get(q_num, f"量表题 {q_num}")
-            option_count = len(self.config["option_texts"].get(q_num, [])) or 1
-            ttk.Label(table_frame, text=f"第{q_num}题", font=("Arial", 10)).grid(row=base_row, column=0, padx=padx,
-                                                                                 pady=pady, sticky=tk.NW)
-            preview_text = q_text
-            ttk.Label(table_frame, text=preview_text, width=20, anchor="w", wraplength=300).grid(row=base_row, column=1,
-                                                                                                 padx=padx, pady=pady,
-                                                                                                 sticky=tk.NW)
+
+            # 关键修复：使用概率配置列表的长度作为刻度数量
+            option_count = len(probs) if probs else 0
+
+            # 题号标签
+            ttk.Label(table_frame, text=f"第{q_num}题", font=("Arial", 10)).grid(
+                row=base_row, column=0, padx=padx, pady=pady, sticky=tk.NW)
+
+            # 题目预览（带提示）
+            preview_text = q_text[:30] + "..." if len(q_text) > 30 else q_text
+            preview_label = ttk.Label(table_frame, text=preview_text, width=20, anchor="w", wraplength=300)
+            preview_label.grid(row=base_row, column=1, padx=padx, pady=pady, sticky=tk.NW)
+
+            # 添加题目提示
+            ToolTip(preview_label, f"完整题目: {q_text}", wraplength=400)
+
+            # 选项配置行
             option_line = ttk.Frame(table_frame)
             option_line.grid(row=base_row, column=2, padx=padx, pady=pady, sticky=tk.W)
+
+            # 创建每个刻度的输入框
             entry_row = []
             for opt_idx in range(option_count):
                 ttk.Label(option_line, text=f"刻度{opt_idx + 1}:", width=5).pack(side=tk.LEFT, padx=(0, 2))
                 entry = ttk.Entry(option_line, width=6)
-                if isinstance(probs, list) and opt_idx < len(probs):
+                if opt_idx < len(probs):
                     entry.insert(0, str(probs[opt_idx]))
                 else:
-                    entry.insert(0, "0.2")
+                    entry.insert(0, "0.2")  # 默认值
                 entry.pack(side=tk.LEFT, padx=(0, 2))
                 entry_row.append(entry)
+
+            # 保存输入框引用
             self.scale_entries.append(entry_row)
+
+            # 按钮组
             btn_group = ttk.Frame(option_line)
             btn_group.pack(side=tk.LEFT, padx=(8, 0))
+
+            # 快捷操作按钮
             ttk.Button(btn_group, text="偏左", width=4,
                        command=lambda q=q_num, e=entry_row: self.set_question_bias("scale", "left", q, e)).pack(
                 side=tk.LEFT, padx=1)
@@ -2291,11 +2317,13 @@ class WJXAutoFillApp:
                        command=lambda q=q_num, e=entry_row: self.set_question_bias("scale", "right", q, e)).pack(
                 side=tk.LEFT, padx=1)
             ttk.Button(btn_group, text="随机", width=4,
-                       command=lambda q=q_num, e=entry_row: self.set_question_random("scale", q, e)).pack(side=tk.LEFT,
-                                                                                                          padx=1)
+                       command=lambda q=q_num, e=entry_row: self.set_question_random("scale", q, e)).pack(
+                side=tk.LEFT, padx=1)
             ttk.Button(btn_group, text="平均", width=4,
-                       command=lambda q=q_num, e=entry_row: self.set_question_average("scale", q, e)).pack(side=tk.LEFT,
-                                                                                                           padx=1)
+                       command=lambda q=q_num, e=entry_row: self.set_question_average("scale", q, e)).pack(
+                side=tk.LEFT, padx=1)
+
+            # 分隔线
             ttk.Separator(table_frame, orient='horizontal').grid(
                 row=base_row + 1, column=0, columnspan=3, sticky='ew', pady=10
             )
@@ -5343,97 +5371,86 @@ class WJXAutoFillApp:
             self.status_indicator.config(foreground="red")
 
     def set_param(self, key, value):
-        """通用参数设置方法，既修改config，又同步所有相关UI控件的值"""
-        self.config[key] = value
+        """
+        设置全局参数如目标份数，并同步刷新主UI控件和显示。
+        支持AI助手Tab指令后自动刷新对应控件。
+        """
+        if key in self.config:
+            self.config[key] = value
+            # 刷新UI控件
+            try:
+                if key == "target_num":
+                    # 目标份数（Spinbox）
+                    self.target_entry.set(value)
+                elif key == "weixin_ratio":
+                    # 微信作答比率（Scale/Label）
+                    self.ratio_scale.set(float(value))
+                    self.ratio_var.set(f"{float(value) * 100:.0f}%")
+                elif key == "min_duration":
+                    self.min_duration.set(int(value))
+                elif key == "max_duration":
+                    self.max_duration.set(int(value))
+                elif key == "min_delay":
+                    self.min_delay.set(float(value))
+                elif key == "max_delay":
+                    self.max_delay.set(float(value))
+                elif key == "per_question_delay":
+                    # value为元组或列表
+                    self.min_q_delay.set(float(value[0]))
+                    self.max_q_delay.set(float(value[1]))
+                elif key == "per_page_delay":
+                    self.min_p_delay.set(float(value[0]))
+                    self.max_p_delay.set(float(value[1]))
+                elif key == "submit_delay":
+                    self.submit_delay.set(int(value))
+                elif key == "num_threads":
+                    self.num_threads.set(int(value))
+                elif key == "use_ip":
+                    self.use_ip_var.set(bool(value))
+                elif key == "ip_api":
+                    self.ip_entry.delete(0, "end")
+                    self.ip_entry.insert(0, str(value))
+                elif key == "ip_change_mode":
+                    self.ip_change_mode.set(value)
+                elif key == "ip_change_batch":
+                    self.ip_change_batch.set(int(value))
+                elif key == "headless":
+                    self.headless_var.set(bool(value))
+                elif key == "enable_smart_gap":
+                    self.enable_smart_gap_var.set(bool(value))
+                elif key == "min_submit_gap":
+                    self.min_submit_gap.set(int(value))
+                elif key == "max_submit_gap":
+                    self.max_submit_gap.set(int(value))
+                elif key == "batch_size":
+                    self.batch_size.set(int(value))
+                elif key == "batch_pause":
+                    self.batch_pause.set(int(value))
+                elif key == "ai_service":
+                    self.ai_service.set(value)
+                elif key == "ai_fill_enabled":
+                    self.ai_fill_var.set(bool(value))
+                elif key == "openai_api_key":
+                    self.openai_api_key_entry.delete(0, "end")
+                    self.openai_api_key_entry.insert(0, str(value))
+                elif key == "qingyan_api_key":
+                    self.qingyan_api_key_entry.delete(0, "end")
+                    self.qingyan_api_key_entry.insert(0, str(value))
+                elif key == "ai_prompt_template":
+                    self.ai_prompt_combobox.set(str(value))
+            except Exception as e:
+                import logging
+                logging.warning(f"set_param({key})时同步控件出错: {e}")
 
-        # 统一UI控件同步（需要根据你的控件变量名调整补充）
-        if key == "url":
-            if hasattr(self, "url_entry"):
-                self.url_entry.delete(0, tk.END)
-                self.url_entry.insert(0, str(value))
-        elif key == "target_num":
-            if hasattr(self, "target_entry"):
-                self.target_entry.delete(0, tk.END)
-                self.target_entry.insert(0, str(value))
-        elif key == "weixin_ratio":
-            if hasattr(self, "ratio_scale"):
-                self.ratio_scale.set(float(value))
-            if hasattr(self, "ratio_var"):
-                self.ratio_var.set(f"{float(value) * 100:.0f}%")
-        elif key == "min_duration":
-            if hasattr(self, "min_duration"):
-                self.min_duration.set(str(value))
-        elif key == "max_duration":
-            if hasattr(self, "max_duration"):
-                self.max_duration.set(str(value))
-        elif key == "min_delay":
-            if hasattr(self, "min_delay"):
-                self.min_delay.set(str(value))
-        elif key == "max_delay":
-            if hasattr(self, "max_delay"):
-                self.max_delay.set(str(value))
-        elif key == "submit_delay":
-            if hasattr(self, "submit_delay"):
-                self.submit_delay.set(str(value))
-        elif key == "num_threads":
-            if hasattr(self, "num_threads"):
-                self.num_threads.set(str(value))
-        elif key == "use_ip":
-            if hasattr(self, "use_ip_var"):
-                self.use_ip_var.set(bool(value))
-        elif key == "ip_api":
-            if hasattr(self, "ip_entry"):
-                self.ip_entry.delete(0, tk.END)
-                self.ip_entry.insert(0, str(value))
-        elif key == "ip_change_mode":
-            if hasattr(self, "ip_change_mode"):
-                self.ip_change_mode.set(str(value))
-        elif key == "ip_change_batch":
-            if hasattr(self, "ip_change_batch"):
-                self.ip_change_batch.set(str(value))
-        elif key == "headless":
-            if hasattr(self, "headless_var"):
-                self.headless_var.set(bool(value))
-        elif key == "enable_smart_gap":
-            if hasattr(self, "enable_smart_gap_var"):
-                self.enable_smart_gap_var.set(bool(value))
-        elif key == "min_submit_gap":
-            if hasattr(self, "min_submit_gap"):
-                self.min_submit_gap.set(str(value))
-        elif key == "max_submit_gap":
-            if hasattr(self, "max_submit_gap"):
-                self.max_submit_gap.set(str(value))
-        elif key == "batch_size":
-            if hasattr(self, "batch_size"):
-                self.batch_size.set(str(value))
-        elif key == "batch_pause":
-            if hasattr(self, "batch_pause"):
-                self.batch_pause.set(str(value))
-        elif key == "ai_service":
-            if hasattr(self, "ai_service"):
-                self.ai_service.set(str(value))
-        elif key == "ai_fill_enabled":
-            if hasattr(self, "ai_fill_var"):
-                self.ai_fill_var.set(bool(value))
-        elif key == "openai_api_key":
-            if hasattr(self, "openai_api_key_entry"):
-                self.openai_api_key_entry.delete(0, tk.END)
-                self.openai_api_key_entry.insert(0, str(value))
-        elif key == "qingyan_api_key":
-            if hasattr(self, "qingyan_api_key_entry"):
-                self.qingyan_api_key_entry.delete(0, tk.END)
-                self.qingyan_api_key_entry.insert(0, str(value))
-        elif key == "ai_prompt_template":
-            if hasattr(self, "ai_prompt_combobox"):
-                self.ai_prompt_combobox.set(str(value))
-        # 你可以继续添加其他参数和控件的同步...
-
-        # 部分参数（如题型设置等）可能需要刷新界面
-        # 如果有相关刷新方法可调用
-        if hasattr(self, "reload_question_settings"):
-            self.reload_question_settings()
-
-        return True, f"{key} 已修改为 {value}"
+            # 题型参数变化时刷新题型设置
+            if key in [
+                "single_prob", "multiple_prob", "matrix_prob", "texts", "multiple_texts",
+                "reorder_prob", "droplist_prob", "scale_prob", "other_texts",
+                "question_texts", "option_texts"
+            ]:
+                self.reload_question_settings()
+            return True, f"{key} 已修改为 {value}"
+        return False, f"参数 {key} 不存在"
 
     def set_question_type(self, q_num, q_type):
         """设置指定题号的题型"""
